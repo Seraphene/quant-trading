@@ -10,6 +10,8 @@ Usage
 import argparse
 from dataclasses import dataclass, field
 from typing import Optional
+import os
+import joblib
 
 import pandas as pd
 import numpy as np
@@ -54,12 +56,23 @@ class Trade:
 # ── Backtester ────────────────────────────────────────────────
 
 class Backtester:
-    def __init__(self, equity: float = INITIAL_EQUITY):
+    def __init__(self, equity: float = INITIAL_EQUITY, use_ml: bool = False):
         self.start_equity = equity
         self.equity = equity
         self.trades: list[Trade] = []
         self.equity_curve: list[float] = []
         self._open_trades: list[Trade] = []
+        self.use_ml = use_ml
+        self.model = None
+        
+        if self.use_ml:
+            model_path = os.path.join(os.path.dirname(__file__), "models", "logistic_regression_model.pkl")
+            if os.path.exists(model_path):
+                log.info("Loading ML model for backtesting filter...")
+                self.model = joblib.load(model_path)
+            else:
+                log.warning(f"Could not find ML model at {model_path}. Proceeding without ML filter.")
+                self.use_ml = False
 
     def run(self, signal_df: pd.DataFrame, trade_df: pd.DataFrame) -> None:
         """
@@ -180,13 +193,77 @@ class Backtester:
             #    actually filled at tomorrow's Open (step 1 on next bar).
             sig = sig_lookup.get(date)
             if sig is not None:
-                order = rm.evaluate(sig, TRADE_SYMBOL)
-                if order is not None:
-                    pending.append((order, sig))
-                    log.debug(
-                        f"QUEUED {order.direction.value} {date.date()} "
-                        f"(will fill next bar's Open)"
-                    )
+                vetoed = False
+                if self.use_ml and self.model is not None:
+                    try:
+                        # ── Calculate 26 derived features expected by model ──
+                        # Date features
+                        entry_yr = date.year
+                        entry_mo = date.month
+                        entry_dy = date.day
+                        entry_dow = date.dayofweek
+                        
+                        # Engineered Technicals
+                        atr_ratio = row["ATR"] / row["Close"] if row["Close"] != 0 else 0
+                        ema_gap = (row["EMA_fast"] - row["EMA_slow"]) / row["EMA_slow"] if row["EMA_slow"] != 0 else 0
+                        macd = row.get("MACD", 0)
+                        macds = row.get("MACD_signal", 0)
+                        momentum = row["Close"] - trade_df.iloc[max(0, i - 5)]["Close"]
+                        vol_change = row["Volume"] / trade_df.iloc[max(0, i - 1)]["Volume"] if trade_df.iloc[max(0, i - 1)]["Volume"] != 0 else 1.0
+                        
+                        # Factor One-Hot Encoding
+                        f_list = sig.factors
+                        
+                        features_dict = {
+                            'entry_price': row["Close"],
+                            'stop_loss': sig.stop_loss,
+                            'take_profit': sig.take_profit,
+                            'confluence': sig.confluence,
+                            'entry_year': entry_yr,
+                            'entry_month': entry_mo,
+                            'entry_day': entry_dy,
+                            'entry_dayofweek': entry_dow,
+                            'RSI': row["RSI"],
+                            'MACD': macd,
+                            'MACDs': macds,
+                            'EMA_Gap': ema_gap,
+                            'ATR': row["ATR"],
+                            'ATR_Ratio': atr_ratio,
+                            'Recent_Price_Momentum': momentum,
+                            'Volume_Changes': vol_change,
+                            'direction_SHORT': 1 if sig.direction == Direction.SHORT else 0,
+                            'factor_FVG_zone': 1 if "FVG_zone" in f_list else 0,
+                            'factor_LIQ_sweep': 1 if "LIQ_sweep" in f_list else 0,
+                            'factor_EMA_trend': 1 if "EMA_trend" in f_list else 0,
+                            'factor_MACD_confirm': 1 if "MACD_confirm" in f_list else 0,
+                            'factor_Order_Block': 1 if "Order_Block" in f_list else 0,
+                            'factor_RSI_filter': 1 if "RSI_filter" in f_list else 0,
+                            'factor_EMA_cross': 1 if "EMA_cross" in f_list else 0
+                        }
+                        
+                        features = pd.DataFrame([features_dict])
+                        
+                        # Ensure column order perfectly matches model expectations
+                        if hasattr(self.model, "feature_names_in_"):
+                            features = features[self.model.feature_names_in_]
+                            
+                        win_prob = self.model.predict_proba(features)[0][1]
+                        if win_prob < 0.50:
+                            vetoed = True
+                            log.debug(f"AI VETO {date.date()}: Win prob {win_prob:.2%} < 50%. Skipping signal.")
+                        else:
+                            log.debug(f"AI APPROVED {date.date()}: Win prob {win_prob:.2%} >= 50%.")
+                    except Exception as e:
+                        log.error(f"ML Prediction failed: {e}")
+
+                if not vetoed:
+                    order = rm.evaluate(sig, TRADE_SYMBOL)
+                    if order is not None:
+                        pending.append((order, sig))
+                        log.debug(
+                            f"QUEUED {order.direction.value} {date.date()} "
+                            f"(will fill next bar's Open)"
+                        )
 
             self.equity_curve.append(self.equity)
 
@@ -284,6 +361,7 @@ class Backtester:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest the gold strategy")
     parser.add_argument("--equity", type=float, default=INITIAL_EQUITY, help="Starting equity")
+    parser.add_argument("--use-ml", action="store_true", help="Enable the ML model veto filter")
     args = parser.parse_args()
 
     log.info("Fetching signal data …")
@@ -298,7 +376,7 @@ def main() -> None:
     trade_df  = trade_df.loc[common]
     log.info(f"Aligned {len(common)} shared trading days")
 
-    bt = Backtester(equity=args.equity)
+    bt = Backtester(equity=args.equity, use_ml=args.use_ml)
     bt.run(signal_df, trade_df)
 
     print("\n" + bt.report() + "\n")

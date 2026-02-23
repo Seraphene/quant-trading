@@ -14,6 +14,8 @@ Usage
 import argparse
 import time
 from datetime import datetime
+import joblib
+import os
 
 import pandas as pd
 
@@ -120,6 +122,82 @@ def run_cycle() -> None:
     if order is None:
         log.info("Risk manager rejected the signal.")
         return
+
+    # ── ML Veto Filter ─────────────────────────────────────────
+    model_path = os.path.join(os.path.dirname(__file__), "models", "logistic_regression_model.pkl")
+    if os.path.exists(model_path):
+        log.info("Found ML model. Running AI prediction...")
+        try:
+            model = joblib.load(model_path)
+            
+            # ── Calculate 26 derived features expected by model ──
+            bar_index = df.index.get_loc(sig.date)
+            row = df.iloc[bar_index]
+            
+            # Date features
+            entry_yr = sig.date.year
+            entry_mo = sig.date.month
+            entry_dy = sig.date.day
+            entry_dow = sig.date.dayofweek
+            
+            # Engineered Technicals
+            atr_ratio = row["ATR"] / row["Close"] if row["Close"] != 0 else 0
+            ema_gap = (row["EMA_fast"] - row["EMA_slow"]) / row["EMA_slow"] if row["EMA_slow"] != 0 else 0
+            macd = row.get("MACD", 0)
+            macds = row.get("MACD_signal", 0)
+            momentum = row["Close"] - df.iloc[max(0, bar_index - 5)]["Close"]
+            vol_change = row["Volume"] / df.iloc[max(0, bar_index - 1)]["Volume"] if df.iloc[max(0, bar_index - 1)]["Volume"] != 0 else 1.0
+            
+            # Factor One-Hot Encoding
+            f_list = sig.factors
+            
+            features_dict = {
+                'entry_price': row["Close"],
+                'stop_loss': sig.stop_loss,
+                'take_profit': sig.take_profit,
+                'confluence': sig.confluence,
+                'entry_year': entry_yr,
+                'entry_month': entry_mo,
+                'entry_day': entry_dy,
+                'entry_dayofweek': entry_dow,
+                'RSI': row["RSI"],
+                'MACD': macd,
+                'MACDs': macds,
+                'EMA_Gap': ema_gap,
+                'ATR': row["ATR"],
+                'ATR_Ratio': atr_ratio,
+                'Recent_Price_Momentum': momentum,
+                'Volume_Changes': vol_change,
+                'direction_SHORT': 1 if sig.direction == Direction.SHORT else 0,
+                'factor_FVG_zone': 1 if "FVG_zone" in f_list else 0,
+                'factor_LIQ_sweep': 1 if "LIQ_sweep" in f_list else 0,
+                'factor_EMA_trend': 1 if "EMA_trend" in f_list else 0,
+                'factor_MACD_confirm': 1 if "MACD_confirm" in f_list else 0,
+                'factor_Order_Block': 1 if "Order_Block" in f_list else 0,
+                'factor_RSI_filter': 1 if "RSI_filter" in f_list else 0,
+                'factor_EMA_cross': 1 if "EMA_cross" in f_list else 0
+            }
+            
+            features = pd.DataFrame([features_dict])
+            
+            # Ensure column order perfectly matches model expectations
+            if hasattr(model, "feature_names_in_"):
+                features = features[model.feature_names_in_]
+                
+            
+            # predict_proba returns [[prob_loss, prob_win]]
+            win_prob = model.predict_proba(features)[0][1]
+            log.info(f"AI Win Probability: {win_prob:.2%}")
+            
+            if win_prob < 0.50:
+                log.warning(f"AI VETO: Win probability ({win_prob:.2%}) is below 50%. Skipping trade.")
+                return
+            else:
+                log.info("AI APPROVED: Trade passes the machine learning filter.")
+        except Exception as e:
+            log.error(f"Failed to run ML prediction: {e}. Proceeding without AI filter.")
+    else:
+        log.info("No ML model found in models/ - running pure rule-based strategy.")
 
     # Fire the bracket order
     submit_bracket_order(client, order)
