@@ -2,6 +2,26 @@
 A journey to Quantitative Trading. This utilizes Price Action. This will primarily focus on XAUUSD / NASDAQ.
 
 
+Highest Achieve:
+2024 - 2026
+
+Metric              Value
+------------------  ---------
+Start Equity        $170.00
+End Equity          $510.22
+Total P&L           $+340.22
+Return              +200.13 %
+Total Trades        59
+Win Rate            67.8 %
+Avg Win             $+11.23
+Avg Loss            $-5.73
+Profit Factor       4.12
+Expectancy / trade  $+5.77
+Max Drawdown        -11.49 %
+
+
+
+WHAT HAPPENED:
 Only 12-14 trades for the whole 5 years?
 
 100,000 usd equity with 7k profit only?
