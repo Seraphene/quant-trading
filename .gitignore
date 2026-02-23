@@ -1,0 +1,27 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Data artefacts
+data/*.csv
+models/*.pkl
+models/*.h5
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+logs/*.log
+
+# Jupyter
+.ipynb_checkpoints/
