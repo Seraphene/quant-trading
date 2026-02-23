@@ -30,7 +30,7 @@ from logger import get_logger
 
 log = get_logger("backtest")
 
-INITIAL_EQUITY = 170.0                  # default paper capital ($170)
+INITIAL_EQUITY = 10000.0                  # default paper capital ($170)
 
 
 # ── Trade record ──────────────────────────────────────────────

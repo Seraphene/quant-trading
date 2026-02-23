@@ -28,7 +28,7 @@ USE_FRACTIONAL: bool = True         # Alpaca supports fractional shares
 
 # ── Data Settings ─────────────────────────────────────────────
 DATA_DIR: Path         = ROOT_DIR / "data"
-LOOKBACK_YEARS: int    = 2          # years of daily history to download (from 2024)
+LOOKBACK_YEARS: int    = 5          # years of daily history to download (from 2024)
 TIMEFRAME: str         = "1d"       # candle granularity
 
 # ── Strategy Parameters ───────────────────────────────────────
