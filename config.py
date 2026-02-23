@@ -28,7 +28,7 @@ USE_FRACTIONAL: bool = True         # Alpaca supports fractional shares
 
 # ── Data Settings ─────────────────────────────────────────────
 DATA_DIR: Path         = ROOT_DIR / "data"
-LOOKBACK_YEARS: int    = 4          # years of daily history to download (from 2022)
+LOOKBACK_YEARS: int    = 2          # years of daily history to download (from 2024)
 TIMEFRAME: str         = "1d"       # candle granularity
 
 # ── Strategy Parameters ───────────────────────────────────────
@@ -63,8 +63,9 @@ SIGNAL_COOLDOWN: int   = 5          # minimum bars between signals (avoid cluste
 
 # ── Risk Management ───────────────────────────────────────────
 RISK_PER_TRADE: float  = 0.02       # max 2 % of equity risked per trade
-MAX_OPEN_POSITIONS: int = 3         # concurrent position cap
+MAX_OPEN_POSITIONS: int = 5         # concurrent position cap
 DAILY_LOSS_LIMIT: float = 0.02     # halt trading if daily P&L drops below −2 %
+SLIPPAGE_PCT: float    = 0.0005    # 0.05 % slippage added to each entry fill
 
 # ── Kelly Criterion ───────────────────────────────────────────
 USE_KELLY: bool         = True      # enable Kelly-based sizing

@@ -92,20 +92,20 @@ def price_in_fvg_zone(df: pd.DataFrame, idx: int, direction: str) -> bool:
     direction: 'LONG' checks bullish FVGs, 'SHORT' checks bearish.
     """
     start = max(0, idx - FVG_LOOKBACK)
-    close = df["Close"].iloc[idx]
+    close = df["Close"].values[idx]
 
     if direction == "LONG":
-        for j in range(start, idx):
-            lo = df["FVG_bull_zone_lo"].iloc[j]
-            hi = df["FVG_bull_zone_hi"].iloc[j]
-            if not np.isnan(lo) and lo <= close <= hi:
-                return True
+        lo_arr = df["FVG_bull_zone_lo"].values
+        hi_arr = df["FVG_bull_zone_hi"].values
     else:
-        for j in range(start, idx):
-            lo = df["FVG_bear_zone_lo"].iloc[j]
-            hi = df["FVG_bear_zone_hi"].iloc[j]
-            if not np.isnan(lo) and lo <= close <= hi:
-                return True
+        lo_arr = df["FVG_bear_zone_lo"].values
+        hi_arr = df["FVG_bear_zone_hi"].values
+
+    for j in range(start, idx):
+        lo = lo_arr[j]
+        hi = hi_arr[j]
+        if not np.isnan(lo) and lo <= close <= hi:
+            return True
     return False
 
 
@@ -180,20 +180,20 @@ def detect_order_blocks(df: pd.DataFrame) -> pd.DataFrame:
 def price_in_order_block(df: pd.DataFrame, idx: int, direction: str) -> bool:
     """Check if current close is within a recent order block zone."""
     start = max(0, idx - OB_LOOKBACK)
-    close = df["Close"].iloc[idx]
+    close = df["Close"].values[idx]
 
     if direction == "LONG":
-        for j in range(start, idx):
-            lo = df["OB_bull_lo"].iloc[j]
-            hi = df["OB_bull_hi"].iloc[j]
-            if not np.isnan(lo) and lo <= close <= hi:
-                return True
+        lo_arr = df["OB_bull_lo"].values
+        hi_arr = df["OB_bull_hi"].values
     else:
-        for j in range(start, idx):
-            lo = df["OB_bear_lo"].iloc[j]
-            hi = df["OB_bear_hi"].iloc[j]
-            if not np.isnan(lo) and lo <= close <= hi:
-                return True
+        lo_arr = df["OB_bear_lo"].values
+        hi_arr = df["OB_bear_hi"].values
+
+    for j in range(start, idx):
+        lo = lo_arr[j]
+        hi = hi_arr[j]
+        if not np.isnan(lo) and lo <= close <= hi:
+            return True
     return False
 
 

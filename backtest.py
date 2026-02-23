@@ -21,7 +21,7 @@ from tabulate import tabulate
 from config import (
     SIGNAL_SYMBOL, TRADE_SYMBOL, DATA_DIR, LOGS_DIR,
     RISK_PER_TRADE, MAX_OPEN_POSITIONS, DAILY_LOSS_LIMIT,
-    ATR_SL_MULT, ATR_TP_MULT,
+    ATR_SL_MULT, ATR_TP_MULT, SLIPPAGE_PCT,
 )
 from data_fetch import fetch_and_enrich
 from strategy import generate_signals, Signal, Direction
@@ -63,11 +63,20 @@ class Backtester:
 
     def run(self, signal_df: pd.DataFrame, trade_df: pd.DataFrame) -> None:
         """
-        Walk bar-by-bar through *trade_df* (GLD), using pre-computed
-        signals from *signal_df* (GC=F).
+        Walk bar-by-bar through *trade_df*, using pre-computed signals
+        from *signal_df*.
 
-        Because the signal and trade symbol share the same dates (daily),
-        we align on the date index.
+        Realism improvements
+        ────────────────────
+        • **Next-bar entry**: signal on day N → order queued → fills at
+          day N+1's Open (+ slippage).  This is what actually happens in
+          live trading: the bot runs after close, sees the signal, and
+          the market order fills at the next open.
+        • **Slippage**: entry price is nudged against the trader by
+          SLIPPAGE_PCT to simulate real-world fill costs.
+        • **Worst-case SL/TP**: when both SL *and* TP were touched in the
+          same bar, the stop-loss is always assumed to have hit first
+          (conservative / pessimistic assumption).
         """
         # Build a signal lookup:  date → Signal
         signals = generate_signals(signal_df)
@@ -75,9 +84,13 @@ class Backtester:
 
         rm = RiskManager(self.equity)
 
+        # Pending orders: signal evaluated on bar N, executed on bar N+1
+        pending: list[tuple[OrderRequest, Signal]] = []
+
         for i in range(len(trade_df)):
             row = trade_df.iloc[i]
             date = trade_df.index[i]
+            open_ = row["Open"]
             close = row["Close"]
             high  = row["High"]
             low   = row["Low"]
@@ -85,22 +98,67 @@ class Backtester:
             # Reset daily P&L tracker at each new bar (daily bars = 1 bar/day)
             rm.reset_daily(self.equity)
 
-            # ── Check open trades for SL / TP hit ─────────────
+            # ── 1. Fill pending orders at today's Open ────────
+            #    These were queued yesterday; in live trading the market
+            #    order would fill at today's opening price.
+            new_pending: list[tuple[OrderRequest, Signal]] = []
+            for order, sig_obj in pending:
+                # Apply slippage: nudge price against the trader
+                if order.direction == Direction.LONG:
+                    fill_price = open_ * (1 + SLIPPAGE_PCT)
+                else:
+                    fill_price = open_ * (1 - SLIPPAGE_PCT)
+
+                # Recalculate SL/TP from actual fill price (same ATR multiples)
+                atr_val = sig_obj.atr
+                if order.direction == Direction.LONG:
+                    sl = fill_price - atr_val * ATR_SL_MULT
+                    tp = fill_price + atr_val * ATR_TP_MULT
+                else:
+                    sl = fill_price + atr_val * ATR_SL_MULT
+                    tp = fill_price - atr_val * ATR_TP_MULT
+
+                t = Trade(
+                    entry_date=date,
+                    direction=order.direction.value,
+                    qty=order.qty,
+                    entry_price=fill_price,
+                    stop_loss=sl,
+                    take_profit=tp,
+                    confluence=sig_obj.confluence,
+                    factors="|".join(sig_obj.factors),
+                )
+                self._open_trades.append(t)
+                self.trades.append(t)
+                rm.add_position()
+                log.debug(
+                    f"FILL  {t.direction} {date.date()} {t.qty:.4f}x{TRADE_SYMBOL} "
+                    f"@ {fill_price:.2f} (open={open_:.2f} +slip)"
+                )
+            pending = new_pending          # always empty after processing
+
+            # ── 2. Check open trades for SL / TP hit ──────────
+            #    Worst-case rule: if *both* SL and TP could fire in the
+            #    same bar, assume the stop-loss hit first (pessimistic).
             still_open: list[Trade] = []
             for t in self._open_trades:
                 hit = False
                 if t.direction == Direction.LONG.value:
-                    if low <= t.stop_loss:
+                    sl_hit = low <= t.stop_loss
+                    tp_hit = high >= t.take_profit
+                    if sl_hit:                       # SL checked first (worst case)
                         t.exit_price = t.stop_loss
                         hit = True
-                    elif high >= t.take_profit:
+                    elif tp_hit:
                         t.exit_price = t.take_profit
                         hit = True
                 else:  # SHORT
-                    if high >= t.stop_loss:
+                    sl_hit = high >= t.stop_loss
+                    tp_hit = low <= t.take_profit
+                    if sl_hit:
                         t.exit_price = t.stop_loss
                         hit = True
-                    elif low <= t.take_profit:
+                    elif tp_hit:
                         t.exit_price = t.take_profit
                         hit = True
 
@@ -117,28 +175,18 @@ class Backtester:
                     still_open.append(t)
             self._open_trades = still_open
 
-            # ── Check for new signal on this date ─────────────
+            # ── 3. Queue new signal for NEXT-bar execution ────
+            #    Signal appears on this bar → order evaluated now →
+            #    actually filled at tomorrow's Open (step 1 on next bar).
             sig = sig_lookup.get(date)
             if sig is not None:
                 order = rm.evaluate(sig, TRADE_SYMBOL)
                 if order is not None:
-                    # Use *trade_df* close as actual fill price
-                    # Retrieve confluence data from the signal
-                    sig_obj = sig_lookup[date]
-                    t = Trade(
-                        entry_date=date,
-                        direction=order.direction.value,
-                        qty=order.qty,
-                        entry_price=close,
-                        stop_loss=order.stop_loss,
-                        take_profit=order.take_profit,
-                        confluence=sig_obj.confluence,
-                        factors="|".join(sig_obj.factors),
+                    pending.append((order, sig))
+                    log.debug(
+                        f"QUEUED {order.direction.value} {date.date()} "
+                        f"(will fill next bar's Open)"
                     )
-                    self._open_trades.append(t)
-                    self.trades.append(t)
-                    rm.add_position()
-                    log.debug(f"ENTRY {t.direction} {date.date()} {t.qty}×{TRADE_SYMBOL} @ {close:.2f}")
 
             self.equity_curve.append(self.equity)
 
