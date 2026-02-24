@@ -2,6 +2,9 @@
 A journey to Quantitative Trading. This utilizes Price Action. This will primarily focus on XAUUSD / NASDAQ.
 
 
+Self Analysis: Profit mainly come from the bull trend that happened from 2025-2026
+
+
 Highest Achieved:
 With Machine Learning:
 
