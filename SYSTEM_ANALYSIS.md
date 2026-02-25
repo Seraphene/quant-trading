@@ -76,3 +76,85 @@ Currently:
 To activate the AI filter for live trading, `paper_bot.py` must be updated to load this `.pkl` file using `scikit-learn` or `joblib`, and evaluate the current bar's features before placing an order on Alpaca.
 
 The resulting trained model (e.g., `.pkl`) is then exported back to the local `models/` folder to be used by `paper_bot.py` as a high-level trade filter.
+
+---
+
+## 5. Timeframe Preset System (1D ↔ 4H Switching)
+
+The system supports **instant switching** between Daily (1D) and 4-Hour (4H) trading modes through a preset system in `config.py`. No code changes are required — only a single variable or CLI flag needs to change.
+
+### How to Switch Timeframes
+
+**Method 1 – Edit `config.py` (permanent):**
+```python
+ACTIVE_TIMEFRAME: str = "1d"   # ← change to "4h" for intraday
+```
+
+**Method 2 – CLI flag (per-run, no file edits):**
+```bash
+python backtest.py --timeframe 4h --equity 500
+python backtest.py --timeframe 1d
+python paper_bot.py --timeframe 4h
+```
+
+**Method 3 – Environment variable:**
+```bash
+set TIMEFRAME=4h
+python backtest.py
+```
+
+### Parameter Differences (1D vs 4H)
+
+| Parameter | Daily (1D) | 4-Hour (4H) | Rationale |
+|-----------|-----------|-------------|-----------|
+| `LOOKBACK_YEARS` | 5 | 2 | yfinance intraday limit ~730 days |
+| `ATR_TP_MULT` | 3.0 | 2.5 | Tighter TP for smaller intraday moves |
+| `FVG_MIN_BODY_ATR` | 1.0 | 0.8 | Lower displacement threshold |
+| `FVG_LOOKBACK` | 50 | 80 | More bars to scan (4h bars accumulate faster) |
+| `OB_LOOKBACK` | 20 | 30 | Wider lookback for order blocks |
+| `LIQ_SWEEP_LOOKBACK` | 20 | 30 | Wider lookback for liquidity sweeps |
+| `STRUCTURE_BREAK_BARS` | 5 | 8 | More bars between structural breaks |
+| `SIGNAL_COOLDOWN` | 5 (1 week) | 3 (12 hours) | Shorter cooldown for faster timeframe |
+| `RISK_PER_TRADE` | 2.0% | 1.5% | Slightly lower risk for more frequent trades |
+
+### Important Notes
+1. **Data caching**: Each timeframe gets its own CSV (e.g., `SGOL_1d.csv`, `SGOL_4h.csv`), so switching does not trigger unnecessary re-downloads.
+2. **4H Resampling**: yfinance does not support `4h` intervals natively. The system downloads 1-hour data and resamples to 4-hour candles automatically.
+3. **ML Model**: The ML model (`logistic_regression_model.pkl`) was trained on 1D data. If switching to 4H, you should retrain the model on 4H backtest results for best accuracy.
+4. **4H Tuning**: The 4H preset values are reasonable starting defaults. Run a 4H backtest and review performance before live trading — you may want to adjust `ATR_TP_MULT`, `SIGNAL_COOLDOWN`, and SMC lookbacks based on results.
+
+---
+
+## 6. Execution Realism Model
+
+The system includes a comprehensive execution model to prevent over-optimistic backtests and protect live capital.
+
+### Fill Price Simulation
+Instead of filling at the exact Open of the next bar:
+- **Randomized fill**: Price is sampled within the early portion of the bar (Open → Open ± ATR×0.3), capped to the bar's actual High/Low. This models real market orders that fill at whatever price is available.
+- **Dynamic slippage**: Scales with `ATR / price × SLIPPAGE_FACTOR`. Volatile bars = more slippage. Replaces the old flat 0.05%.
+- **Bid-ask spread**: 0.02% per side applied to every entry AND exit, matching typical liquid ETF spreads.
+- Set `FILL_RANDOMIZE = False` in config.py to revert to deterministic Open-price fills.
+
+### Risk Kill Switches
+
+| Guard | Scope | Threshold | Effect |
+|-------|-------|-----------|--------|
+| Daily Loss Limit | Per-day | -2% equity | Halts new trades for rest of day |
+| Max Drawdown | Portfolio lifetime | -30% from peak | Halts ALL new trades permanently |
+| Max Open Positions | Per-signal | 5 positions | Skips new signal |
+
+### Incomplete Candle Guard (Live Trading)
+`paper_bot.py` uses `fetch_and_enrich(drop_incomplete=True)` to strip the last (still-forming) candle before computing indicators, preventing false signals from partial OHLC data.
+
+### Impact of Realism on Backtest Results
+
+| Metric | 1D Before | 1D After | 4H Before | 4H After |
+|--------|-----------|----------|-----------|----------|
+| Return | +264% | +191% | +123% | +13% |
+| Win Rate | 54.4% | 47.3% | 51.5% | 46.8% |
+| Profit Factor | 2.63 | 1.81 | 1.75 | 1.14 |
+| Max Drawdown | -17.6% | -20.5% | -23.9% | -24.6% |
+
+> [!IMPORTANT]
+> The 4H preset is marginal under realistic execution and needs parameter tuning. The 1D preset retains a strong, real edge.

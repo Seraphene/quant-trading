@@ -30,13 +30,7 @@ from typing import Optional
 import pandas as pd
 import numpy as np
 
-from config import (
-    RSI_OVERSOLD, RSI_OVERBOUGHT,
-    ATR_SL_MULT, ATR_TP_MULT,
-    MIN_CONFLUENCE,
-    SIGNAL_COOLDOWN,
-    LIQ_SWEEP_LOOKBACK,
-)
+import config as cfg
 from smc import price_in_fvg_zone, price_in_order_block
 from logger import get_logger
 
@@ -99,9 +93,9 @@ def _score_bar(df: pd.DataFrame, i: int) -> tuple[int, list[str], int, list[str]
     # ── 2. RSI Filter ─────────────────────────────────────────
     rsi_val = row["RSI"]
     if not pd.isna(rsi_val):
-        if rsi_val < RSI_OVERBOUGHT:
+        if rsi_val < cfg.RSI_OVERBOUGHT:
             long_f.append("RSI_filter")
-        if rsi_val > RSI_OVERSOLD:
+        if rsi_val > cfg.RSI_OVERSOLD:
             short_f.append("RSI_filter")
 
     # ── 3. MACD Confirmation ──────────────────────────────────
@@ -148,7 +142,7 @@ def _score_bar(df: pd.DataFrame, i: int) -> tuple[int, list[str], int, list[str]
 
     # ── 8. Liquidity Sweep ────────────────────────────────────
     if "LIQ_sweep_bull" in df.columns:
-        start = max(0, i - LIQ_SWEEP_LOOKBACK)
+        start = max(0, i - cfg.LIQ_SWEEP_LOOKBACK)
         if df["LIQ_sweep_bull"].iloc[start:i + 1].sum() > 0:
             long_f.append("LIQ_sweep")
         if df["LIQ_sweep_bear"].iloc[start:i + 1].sum() < 0:
@@ -179,7 +173,7 @@ def generate_signals(df: pd.DataFrame) -> list[Signal]:
             continue
 
         # Cooldown: skip if too close to the last signal
-        if (i - last_signal_bar) < SIGNAL_COOLDOWN:
+        if (i - last_signal_bar) < cfg.SIGNAL_COOLDOWN:
             continue
 
         close   = row["Close"]
@@ -191,11 +185,11 @@ def generate_signals(df: pd.DataFrame) -> list[Signal]:
         # ── LONG ──────────────────────────────────────────────
         #   Require: EMA_trend (directional bias) + enough confluence.
         #   EMA_cross is no longer mandatory — allows continuation entries.
-        if (long_score >= MIN_CONFLUENCE
+        if (long_score >= cfg.MIN_CONFLUENCE
                 and "EMA_trend" in long_factors
                 and long_score > short_score):
-            sl = close - atr_val * ATR_SL_MULT
-            tp = close + atr_val * ATR_TP_MULT
+            sl = close - atr_val * cfg.ATR_SL_MULT
+            tp = close + atr_val * cfg.ATR_TP_MULT
             sig = Signal(Direction.LONG, close, sl, tp, atr_val, date,
                          long_score, long_factors)
             signals.append(sig)
@@ -206,11 +200,11 @@ def generate_signals(df: pd.DataFrame) -> list[Signal]:
             )
 
         # ── SHORT ─────────────────────────────────────────────
-        elif (short_score >= MIN_CONFLUENCE
+        elif (short_score >= cfg.MIN_CONFLUENCE
                 and "EMA_trend" in short_factors
                 and short_score > long_score):
-            sl = close + atr_val * ATR_SL_MULT
-            tp = close - atr_val * ATR_TP_MULT
+            sl = close + atr_val * cfg.ATR_SL_MULT
+            tp = close - atr_val * cfg.ATR_TP_MULT
             sig = Signal(Direction.SHORT, close, sl, tp, atr_val, date,
                          short_score, short_factors)
             signals.append(sig)
@@ -220,7 +214,7 @@ def generate_signals(df: pd.DataFrame) -> list[Signal]:
                 f"confluence={short_score}  factors={short_factors}"
             )
 
-    log.info(f"Generated {len(signals)} signals over {len(df)} bars  (min_confluence={MIN_CONFLUENCE})")
+    log.info(f"Generated {len(signals)} signals over {len(df)} bars  (min_confluence={cfg.MIN_CONFLUENCE})")
     return signals
 
 

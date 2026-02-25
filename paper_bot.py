@@ -7,8 +7,9 @@ bot only loads a tiny pre-trained model if one exists.
 
 Usage
 ─────
-    python paper_bot.py              # run one decision cycle
-    python paper_bot.py --loop       # run continuously, checking once per day
+    python paper_bot.py                     # run one decision cycle (1d)
+    python paper_bot.py --timeframe 4h      # run with 4-hour candles
+    python paper_bot.py --loop              # run continuously on schedule
 """
 
 import argparse
@@ -26,6 +27,7 @@ from alpaca.trading.requests import (
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, AssetClass
 
+import config as cfg
 from config import (
     ALPACA_API_KEY, ALPACA_SECRET_KEY,
     SIGNAL_SYMBOL, TRADE_SYMBOL,
@@ -95,25 +97,42 @@ def run_cycle() -> None:
     open_pos = get_open_position_count(client)
     log.info(f"Account equity: ${equity:,.2f}  |  Open positions: {open_pos}")
 
-    # Fetch latest data and get a signal from the strategy
+    # Fetch latest data and get a signal from the strategy.
+    # drop_incomplete=True ensures we only compute indicators on fully
+    # CLOSED candles.  yfinance includes the current forming candle
+    # whose H/L/C are still moving — using it would produce unreliable
+    # signals (the "candle is still moving" problem).
     log.info(f"Fetching latest data for {SIGNAL_SYMBOL} …")
-    df = fetch_and_enrich(SIGNAL_SYMBOL, force=True)   # always refresh
+    df = fetch_and_enrich(SIGNAL_SYMBOL, force=True, drop_incomplete=True)
     sig = latest_signal(df)
 
     if sig is None:
-        log.info("No actionable signal today – standing aside.")
+        log.info("No actionable signal – standing aside.")
         return
 
     log.info(
         f"Signal: {sig.direction.value} @ {sig.entry_price:.2f}  "
         f"SL={sig.stop_loss:.2f}  TP={sig.take_profit:.2f}  "
-        f"Date={sig.date.date()}"
+        f"Date={sig.date}"
     )
 
-    # Only act on today's signal (avoid replaying stale signals)
-    today = pd.Timestamp(datetime.today().date())
-    if sig.date.normalize() != today:
-        log.info(f"Latest signal is from {sig.date.date()}, not today – skipping.")
+    # ── Signal freshness check ────────────────────────────────
+    # Only act on recent signals.  For daily candles the signal must
+    # be from today; for 4H candles it must be from the last 8 hours
+    # (2 × candle period) to allow some scheduler flexibility.
+    now = pd.Timestamp(datetime.now())
+    if cfg.ACTIVE_TIMEFRAME == "1d":
+        max_age = pd.Timedelta(days=1)
+    else:
+        # For 4H: allow up to 2 candle-periods of lag
+        max_age = pd.Timedelta(hours=8)
+
+    signal_age = now - sig.date
+    if signal_age > max_age:
+        log.info(
+            f"Latest signal is from {sig.date} "
+            f"({signal_age} ago, max={max_age}) – too stale, skipping."
+        )
         return
 
     # Risk-check the signal
@@ -229,12 +248,35 @@ def loop(check_hour: int = 16, check_minute: int = 5) -> None:
 
 # ── CLI ───────────────────────────────────────────────────────
 
+def _apply_timeframe_override(tf: str) -> None:
+    """Hot-swap the active timeframe preset at runtime."""
+    if tf == cfg.ACTIVE_TIMEFRAME:
+        return
+    if tf not in cfg.TIMEFRAME_PRESETS:
+        raise ValueError(f"Unknown timeframe '{tf}'. Choose from: {list(cfg.TIMEFRAME_PRESETS.keys())}")
+    log.info(f"Overriding timeframe: {cfg.ACTIVE_TIMEFRAME} → {tf}")
+    cfg.ACTIVE_TIMEFRAME = tf
+    for key, value in cfg.TIMEFRAME_PRESETS[tf].items():
+        setattr(cfg, key, value)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Gold paper-trading bot (Alpaca)")
     parser.add_argument("--loop", action="store_true", help="Run on daily schedule")
     parser.add_argument("--hour", type=int, default=16, help="Hour to run (24h)")
     parser.add_argument("--minute", type=int, default=5, help="Minute to run")
+    parser.add_argument(
+        "--timeframe", "-tf",
+        choices=list(cfg.TIMEFRAME_PRESETS.keys()),
+        default=None,
+        help="Override active timeframe (e.g. 1d, 4h)",
+    )
     args = parser.parse_args()
+
+    if args.timeframe:
+        _apply_timeframe_override(args.timeframe)
+
+    log.info(f"Active timeframe: {cfg.ACTIVE_TIMEFRAME}")
 
     if args.loop:
         loop(args.hour, args.minute)

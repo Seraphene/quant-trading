@@ -13,15 +13,7 @@ Responsibilities
 from dataclasses import dataclass
 from typing import Optional
 
-from config import (
-    RISK_PER_TRADE,
-    MAX_OPEN_POSITIONS,
-    DAILY_LOSS_LIMIT,
-    USE_KELLY,
-    KELLY_FRACTION,
-    KELLY_MIN_TRADES,
-    USE_FRACTIONAL,
-)
+import config as cfg
 from strategy import Signal, Direction
 from logger import get_logger
 
@@ -51,6 +43,7 @@ class RiskManager:
         self.open_positions = open_positions
         self.daily_pnl = daily_pnl
         self._starting_equity = equity
+        self._peak_equity = equity      # track peak for max drawdown
         # List of per-trade P&L values (for Kelly computation)
         self.trade_history: list[float] = trade_history or []
 
@@ -60,14 +53,28 @@ class RiskManager:
         """
         Run all risk checks.  Returns an OrderRequest if approved, None if rejected.
         """
+        # Update peak equity for drawdown tracking
+        if self.equity > self._peak_equity:
+            self._peak_equity = self.equity
+
+        # Guard 0 – max portfolio drawdown kill switch
+        if self._peak_equity > 0:
+            current_dd = (self._peak_equity - self.equity) / self._peak_equity
+            if current_dd >= cfg.MAX_DRAWDOWN_PCT:
+                log.warning(
+                    f"MAX DRAWDOWN ({current_dd:.1%}) breached – "
+                    f"halting (peak=${self._peak_equity:.2f}, now=${self.equity:.2f})"
+                )
+                return None
+
         # Guard 1 – daily loss breaker
         if self._daily_loss_breached():
             log.warning("DAILY LOSS LIMIT hit – no new trades today")
             return None
 
         # Guard 2 – max positions
-        if self.open_positions >= MAX_OPEN_POSITIONS:
-            log.warning(f"MAX_OPEN_POSITIONS ({MAX_OPEN_POSITIONS}) reached – skipping")
+        if self.open_positions >= cfg.MAX_OPEN_POSITIONS:
+            log.warning(f"MAX_OPEN_POSITIONS ({cfg.MAX_OPEN_POSITIONS}) reached – skipping")
             return None
 
         # Guard 3 – calculate risk-adjusted size
@@ -125,7 +132,7 @@ class RiskManager:
         Fraction of equity to risk (already scaled by KELLY_FRACTION).
         Returns 0 if not enough data or edge is negative.
         """
-        if len(self.trade_history) < KELLY_MIN_TRADES:
+        if len(self.trade_history) < cfg.KELLY_MIN_TRADES:
             return 0.0
 
         wins   = [t for t in self.trade_history if t > 0]
@@ -147,7 +154,7 @@ class RiskManager:
         if full_kelly <= 0:
             return 0.0   # no edge → don't trade via Kelly
 
-        kelly_lite = full_kelly * KELLY_FRACTION
+        kelly_lite = full_kelly * cfg.KELLY_FRACTION
         log.debug(
             f"Kelly: p={p:.2%} W={W:.2f} full={full_kelly:.3f} "
             f"lite={kelly_lite:.3f} ({len(self.trade_history)} trades)"
@@ -159,7 +166,7 @@ class RiskManager:
     def _daily_loss_breached(self) -> bool:
         if self._starting_equity == 0:
             return False
-        return (self.daily_pnl / self._starting_equity) <= -DAILY_LOSS_LIMIT
+        return (self.daily_pnl / self._starting_equity) <= -cfg.DAILY_LOSS_LIMIT
 
     def _size_position(self, signal: Signal) -> float:
         """
@@ -172,9 +179,9 @@ class RiskManager:
 
         Returns float if USE_FRACTIONAL, else int.
         """
-        risk_frac = RISK_PER_TRADE
+        risk_frac = cfg.RISK_PER_TRADE
 
-        if USE_KELLY:
+        if cfg.USE_KELLY:
             kf = self.kelly_fraction()
             if kf > 0:
                 risk_frac = min(risk_frac, kf)
@@ -188,6 +195,6 @@ class RiskManager:
 
         raw = risk_amount / distance
 
-        if USE_FRACTIONAL:
+        if cfg.USE_FRACTIONAL:
             return round(raw, 4)    # Alpaca accepts up to 9 decimals
         return int(raw)             # floor to whole shares

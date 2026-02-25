@@ -8,13 +8,7 @@ and return enrichment columns that the strategy can query per-bar.
 import pandas as pd
 import numpy as np
 
-from config import (
-    FVG_MIN_BODY_ATR,
-    FVG_LOOKBACK,
-    OB_LOOKBACK,
-    LIQ_SWEEP_LOOKBACK,
-    STRUCTURE_BREAK_BARS,
-)
+import config as cfg
 from logger import get_logger
 
 log = get_logger("smc")
@@ -60,7 +54,7 @@ def detect_fvg(df: pd.DataFrame) -> pd.DataFrame:
 
     for i in range(2, n):
         mid_body = abs(closes[i - 1] - opens[i - 1])
-        displacement = mid_body >= atrs[i - 1] * FVG_MIN_BODY_ATR if not np.isnan(atrs[i - 1]) else False
+        displacement = mid_body >= atrs[i - 1] * cfg.FVG_MIN_BODY_ATR if not np.isnan(atrs[i - 1]) else False
 
         # Bullish FVG: gap up — bar[i-2] high < bar[i] low
         if highs[i - 2] < lows[i] and displacement:
@@ -91,7 +85,7 @@ def price_in_fvg_zone(df: pd.DataFrame, idx: int, direction: str) -> bool:
 
     direction: 'LONG' checks bullish FVGs, 'SHORT' checks bearish.
     """
-    start = max(0, idx - FVG_LOOKBACK)
+    start = max(0, idx - cfg.FVG_LOOKBACK)
     close = df["Close"].values[idx]
 
     if direction == "LONG":
@@ -143,14 +137,14 @@ def detect_order_blocks(df: pd.DataFrame) -> pd.DataFrame:
     opens  = df["Open"].values
     closes = df["Close"].values
 
-    for i in range(OB_LOOKBACK, n):
-        lookback_high = highs[i - OB_LOOKBACK: i].max()
-        lookback_low  = lows[i - OB_LOOKBACK: i].min()
+    for i in range(cfg.OB_LOOKBACK, n):
+        lookback_high = highs[i - cfg.OB_LOOKBACK: i].max()
+        lookback_low  = lows[i - cfg.OB_LOOKBACK: i].min()
 
         # ── Bullish structure break: current close breaks above recent high
         if closes[i] > lookback_high:
             # Find the last bearish candle before this break
-            for j in range(i - 1, max(i - OB_LOOKBACK, 0) - 1, -1):
+            for j in range(i - 1, max(i - cfg.OB_LOOKBACK, 0) - 1, -1):
                 if closes[j] < opens[j]:  # bearish candle
                     ob_bull[j] = 1
                     ob_bull_lo[j] = lows[j]
@@ -160,7 +154,7 @@ def detect_order_blocks(df: pd.DataFrame) -> pd.DataFrame:
         # ── Bearish structure break: current close breaks below recent low
         if closes[i] < lookback_low:
             # Find the last bullish candle before this break
-            for j in range(i - 1, max(i - OB_LOOKBACK, 0) - 1, -1):
+            for j in range(i - 1, max(i - cfg.OB_LOOKBACK, 0) - 1, -1):
                 if closes[j] > opens[j]:  # bullish candle
                     ob_bear[j] = -1
                     ob_bear_lo[j] = lows[j]
@@ -179,7 +173,7 @@ def detect_order_blocks(df: pd.DataFrame) -> pd.DataFrame:
 
 def price_in_order_block(df: pd.DataFrame, idx: int, direction: str) -> bool:
     """Check if current close is within a recent order block zone."""
-    start = max(0, idx - OB_LOOKBACK)
+    start = max(0, idx - cfg.OB_LOOKBACK)
     close = df["Close"].values[idx]
 
     if direction == "LONG":
@@ -224,9 +218,9 @@ def detect_liquidity_sweeps(df: pd.DataFrame) -> pd.DataFrame:
     lows   = df["Low"].values
     closes = df["Close"].values
 
-    for i in range(LIQ_SWEEP_LOOKBACK, n):
-        window_lo = lows[i - LIQ_SWEEP_LOOKBACK: i].min()
-        window_hi = highs[i - LIQ_SWEEP_LOOKBACK: i].max()
+    for i in range(cfg.LIQ_SWEEP_LOOKBACK, n):
+        window_lo = lows[i - cfg.LIQ_SWEEP_LOOKBACK: i].min()
+        window_hi = highs[i - cfg.LIQ_SWEEP_LOOKBACK: i].max()
 
         # Bullish sweep: wick below recent low, close back above
         if lows[i] < window_lo and closes[i] > window_lo:

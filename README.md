@@ -1,104 +1,176 @@
-# quant-trading
-A journey to Quantitative Trading. This utilizes Price Action. This will primarily focus on XAUUSD / NASDAQ.
+# Quant-Trading – Gold Swing & Intraday Bot
 
+A quantitative trading system for SGOL (Gold ETF) using **Price Action + Smart Money Concepts (SMC)** with an optional Machine Learning filter. Designed for Alpaca paper trading.
 
-Highest Achieved:
-With Machine Learning:
+## Quick Start
 
-Metric              Value
-------------------  -----------
-Start Equity        $10,000.00
-End Equity          $38,899.80
-Total P&L           $+28,899.80
-Return              +289.00 %
-Total Trades        76
-Win Rate            65.8 %
-Avg Win             $+750.57
-Avg Loss            $-331.88
-Profit Factor       4.35
-Expectancy / trade  $+380.26
-Max Drawdown        -11.56 %
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
 
+# 2. Copy .env.example → .env and add your Alpaca API keys
+cp .env.example .env
 
-Without Machine Learning:
-Metric              Value
-------------------  -----------
-Start Equity        $10,000.00
-End Equity          $45,080.45
-Total P&L           $+35,080.45
-Return              +350.80 %
-Total Trades        169
-Win Rate            50.3 %
-Avg Win             $+743.51
-Avg Loss            $-334.74
-Profit Factor       2.25
-Expectancy / trade  $+207.58
-Max Drawdown        -25.61 %
+# 3. Run a backtest
+python backtest.py --timeframe 1d --equity 170
+```
 
+## CLI Commands
 
+### Backtesting
 
-WHAT HAPPENED:
-Only 12-14 trades for the whole 5 years?
+```bash
+# Daily timeframe (default)
+python backtest.py
 
-100,000 usd equity with 7k profit only?
+# 4-hour timeframe
+python backtest.py --timeframe 4h
 
+# Custom equity
+python backtest.py --equity 5000
 
-CHANGED TO 172 dollars as equity roughly 10k pesos
+# With ML model filter
+python backtest.py --use-ml
 
-Year 2022 - 2026:
+# Combine flags
+python backtest.py --timeframe 4h --equity 500 --use-ml
+```
 
-Metric	Value
-Start → End	$170.00 → $179.56
-Return	+5.62% (+$9.56)
-Trades	12
-Win Rate	41.7%
-Profit Factor	1.39
-Max Drawdown	-3.96%
-Typical position	~8–16 fractional shares
+### Data Fetching
 
+```bash
+# Download & cache data for active timeframe
+python data_fetch.py
 
+# Force re-download (clear cache)
+python data_fetch.py --force
+```
 
-Metric              Value
+### Signal Scanner
 
-------------------  ---------
+```bash
+# Scan default symbol (SGOL)
+python scanner.py
 
-Start Equity        $170.00
+# Scan Gold Futures
+python scanner.py --symbols GC=F --force
 
-End Equity          $618.39
+# Scan multiple symbols at once
+python scanner.py --symbols GC=F SGOL NQ=F SPY --force
 
-Total P&L           $+448.39
+# Scan on 4-hour timeframe
+python scanner.py --symbols GC=F --timeframe 4h --force
 
-Return              +263.76 %
+# Force fresh download (default: uses cache)
+python scanner.py --symbols GC=F --force
+```
 
-Total Trades        114
+**Common Tickers:**
+| Ticker | Asset |
+|--------|-------|
+| `GC=F` | Gold Futures (COMEX) |
+| `SI=F` | Silver Futures |
+| `NQ=F` | Nasdaq 100 Futures |
+| `ES=F` | S&P 500 Futures |
+| `EURUSD=X` | EUR / USD forex |
+| `GBPUSD=X` | GBP / USD forex |
+| `SGOL` | Aberdeen Gold ETF |
+| `GLD` | SPDR Gold Trust ETF |
+| `SPY` | S&P 500 ETF |
 
-Win Rate            54.4 %
+### Paper Trading (Alpaca)
 
-Avg Win             $+11.67
+```bash
+# Run one decision cycle
+python paper_bot.py
 
-Avg Loss            $-5.29
+# Run with 4-hour candles
+python paper_bot.py --timeframe 4h
 
-Profit Factor       2.63
+# Run on daily schedule (auto-loop)
+python paper_bot.py --loop
 
-Expectancy / trade  $+3.93
+# Custom schedule (run at 10:30 daily)
+python paper_bot.py --loop --hour 10 --minute 30
+```
 
-Max Drawdown        -17.57 %
+### ML Model Retraining
 
+```bash
+# Retrain logistic regression on latest journal data
+python retrain_model.py
+```
 
+### Timeframe Switching
 
+```bash
+# Method 1: CLI flag (per-run, no file edits)
+python backtest.py --timeframe 4h
+python paper_bot.py --timeframe 4h
 
-2024 - 2026
+# Method 2: Edit config.py (permanent)
+# Change: ACTIVE_TIMEFRAME = "4h"
 
-Metric              Value
-------------------  ---------
-Start Equity        $170.00
-End Equity          $510.22
-Total P&L           $+340.22
-Return              +200.13 %
-Total Trades        59
-Win Rate            67.8 %
-Avg Win             $+11.23
-Avg Loss            $-5.73
-Profit Factor       4.12
-Expectancy / trade  $+5.77
-Max Drawdown        -11.49 %
+# Method 3: Environment variable
+set TIMEFRAME=4h
+python backtest.py
+```
+
+## Strategy Overview
+
+**8 Confluence Factors** — a trade triggers only when ≥ 2 align:
+
+| # | Factor | Description |
+|---|--------|-------------|
+| 1 | EMA Trend | EMA 20 vs 50 directional bias |
+| 2 | EMA Crossover | Exact cross bar (bonus) |
+| 3 | RSI Filter | Not overbought/oversold |
+| 4 | MACD Confirm | Histogram expanding in direction |
+| 5 | RSI Divergence | Price vs RSI divergence |
+| 6 | MACD Divergence | Price vs MACD divergence |
+| 7 | Fair Value Gap | Price in recent FVG zone (SMC) |
+| 8 | Order Block | Price in institutional OB zone (SMC) |
+
+**Risk Management:** ATR-based SL/TP, 2% risk per trade, Kelly Criterion sizing, 5-position cap, daily loss circuit breaker.
+
+## Backtest Results
+
+### Daily (1D) – 5 Years
+
+| Metric | Value |
+|--------|-------|
+| Return | +264% |
+| Trades | 114 |
+| Win Rate | 54.4% |
+| Profit Factor | 2.63 |
+| Max Drawdown | -17.57% |
+
+### 4-Hour (4H) – 2 Years
+
+| Metric | Value |
+|--------|-------|
+| Return | +123% |
+| Trades | 171 |
+| Win Rate | 51.5% |
+| Profit Factor | 1.75 |
+| Max Drawdown | -23.94% |
+
+## Project Structure
+
+```
+config.py          ← Central config + timeframe presets
+data_fetch.py      ← Download, cache & enrich OHLCV data
+indicators.py      ← EMA, RSI, ATR, MACD, divergence
+smc.py             ← Fair Value Gaps, Order Blocks, Liquidity Sweeps
+strategy.py        ← 8-factor confluence signal engine
+risk_manager.py    ← Position sizing, Kelly, circuit breakers
+backtest.py        ← Walk-forward backtester with equity curve
+paper_bot.py       ← Live paper-trading bot (Alpaca)
+scanner.py         ← Multi-symbol signal scanner (no broker needed)
+retrain_model.py   ← ML model retraining (logistic regression)
+```
+
+## Docs
+
+- [SYSTEM_ANALYSIS.md](SYSTEM_ANALYSIS.md) – Full system analysis, performance diagnostics, timeframe preset docs
+- [SETUP_GUIDE.md](SETUP_GUIDE.md) – Detailed setup instructions

@@ -3,8 +3,10 @@ backtest.py – Walk-forward backtester with equity curve and performance report
 
 Usage
 ─────
-    python backtest.py                  # default: backtest GC=F signal on GLD
-    python backtest.py --equity 50000   # start with $50 000
+    python backtest.py                          # default: 1d timeframe
+    python backtest.py --timeframe 4h           # switch to 4-hour candles
+    python backtest.py --equity 50000           # start with $50 000
+    python backtest.py --timeframe 4h --use-ml  # 4h with ML filter
 """
 
 import argparse
@@ -20,11 +22,7 @@ matplotlib.use("Agg")                   # headless – no GUI needed
 import matplotlib.pyplot as plt
 from tabulate import tabulate
 
-from config import (
-    SIGNAL_SYMBOL, TRADE_SYMBOL, DATA_DIR, LOGS_DIR,
-    RISK_PER_TRADE, MAX_OPEN_POSITIONS, DAILY_LOSS_LIMIT,
-    ATR_SL_MULT, ATR_TP_MULT, SLIPPAGE_PCT,
-)
+import config as cfg
 from data_fetch import fetch_and_enrich
 from strategy import generate_signals, Signal, Direction
 from risk_manager import RiskManager, OrderRequest
@@ -79,23 +77,37 @@ class Backtester:
         Walk bar-by-bar through *trade_df*, using pre-computed signals
         from *signal_df*.
 
-        Realism improvements
-        ────────────────────
-        • **Next-bar entry**: signal on day N → order queued → fills at
-          day N+1's Open (+ slippage).  This is what actually happens in
-          live trading: the bot runs after close, sees the signal, and
-          the market order fills at the next open.
-        • **Slippage**: entry price is nudged against the trader by
-          SLIPPAGE_PCT to simulate real-world fill costs.
-        • **Worst-case SL/TP**: when both SL *and* TP were touched in the
-          same bar, the stop-loss is always assumed to have hit first
-          (conservative / pessimistic assumption).
+        Execution Realism
+        ─────────────────
+        • **Randomized fill**:  Instead of filling at the exact Open,
+          the fill price is sampled within the early portion of the bar
+          (Open → Open ± ATR×0.3).  This models real market orders that
+          fill at whatever price is available, not tick-zero.
+        • **Dynamic slippage**:  Scales with ATR / price (volatility).
+          Volatile bars = more slippage.  Replaces flat 0.05%.
+        • **Bid-ask spread**:  0.02% per side applied to every entry and
+          exit, matching typical ETF spreads.
+        • **Commission**:  Configurable per-trade cost ($0 for Alpaca).
+        • **Max drawdown kill switch**:  Halts all new trades when equity
+          drops 30% from its peak.
+        • **Worst-case SL/TP**: when both fire in the same bar, stop-loss
+          is assumed to hit first (pessimistic).
         """
+        import random
+
         # Build a signal lookup:  date → Signal
         signals = generate_signals(signal_df)
         sig_lookup: dict[pd.Timestamp, Signal] = {s.date: s for s in signals}
 
         rm = RiskManager(self.equity)
+
+        # Peak equity tracking for max drawdown kill switch
+        peak_equity = self.equity
+        drawdown_halt = False
+
+        # Median volume for reference (used if we add volume-based scaling later)
+        volumes = trade_df["Volume"].values
+        median_vol = np.median(volumes[volumes > 0]) if len(volumes) > 0 else 1.0
 
         # Pending orders: signal evaluated on bar N, executed on bar N+1
         pending: list[tuple[OrderRequest, Signal]] = []
@@ -107,29 +119,73 @@ class Backtester:
             close = row["Close"]
             high  = row["High"]
             low   = row["Low"]
+            bar_vol = max(row["Volume"], 1)
 
-            # Reset daily P&L tracker at each new bar (daily bars = 1 bar/day)
+            # Reset daily P&L tracker at each new bar
             rm.reset_daily(self.equity)
 
-            # ── 1. Fill pending orders at today's Open ────────
-            #    These were queued yesterday; in live trading the market
-            #    order would fill at today's opening price.
+            # Track peak equity for drawdown kill switch
+            if self.equity > peak_equity:
+                peak_equity = self.equity
+
+            # ── 0. Max drawdown kill switch ────────────────────
+            if not drawdown_halt and peak_equity > 0:
+                current_dd = (peak_equity - self.equity) / peak_equity
+                if current_dd >= cfg.MAX_DRAWDOWN_PCT:
+                    drawdown_halt = True
+                    log.warning(
+                        f"MAX DRAWDOWN ({current_dd:.1%}) reached at {date.date()} – "
+                        f"halting all new trades  (peak=${peak_equity:.2f}, now=${self.equity:.2f})"
+                    )
+
+            # ── 1. Fill pending orders ─────────────────────────
+            #    These were queued on the previous bar.
             new_pending: list[tuple[OrderRequest, Signal]] = []
             for order, sig_obj in pending:
-                # Apply slippage: nudge price against the trader
-                if order.direction == Direction.LONG:
-                    fill_price = open_ * (1 + SLIPPAGE_PCT)
+                atr_val = sig_obj.atr
+
+                # ── Realistic fill price ──────────────────────
+                if cfg.FILL_RANDOMIZE and atr_val > 0:
+                    # Sample fill within early portion of bar
+                    # (Open → Open ± ATR*0.3), capped to bar's actual range
+                    max_offset = atr_val * 0.3
+                    if order.direction == Direction.LONG:
+                        # LONG fills at or above Open (adverse move)
+                        fill_base = open_ + random.uniform(0, max_offset)
+                        fill_base = min(fill_base, high)   # can't fill above bar high
+                    else:
+                        # SHORT fills at or below Open (adverse move)
+                        fill_base = open_ - random.uniform(0, max_offset)
+                        fill_base = max(fill_base, low)    # can't fill below bar low
                 else:
-                    fill_price = open_ * (1 - SLIPPAGE_PCT)
+                    fill_base = open_
+
+                # ── Dynamic slippage (ATR-scaled) ─────────────
+                if fill_base > 0 and atr_val > 0:
+                    dyn_slip = (atr_val / fill_base) * cfg.SLIPPAGE_FACTOR
+                else:
+                    dyn_slip = cfg.SLIPPAGE_PCT  # fallback to flat
+
+                # ── Spread cost (bid-ask) ─────────────────────
+                spread = cfg.SPREAD_PCT
+
+                # Apply slippage + spread against the trader
+                if order.direction == Direction.LONG:
+                    fill_price = fill_base * (1 + dyn_slip + spread)
+                else:
+                    fill_price = fill_base * (1 - dyn_slip - spread)
 
                 # Recalculate SL/TP from actual fill price (same ATR multiples)
-                atr_val = sig_obj.atr
                 if order.direction == Direction.LONG:
-                    sl = fill_price - atr_val * ATR_SL_MULT
-                    tp = fill_price + atr_val * ATR_TP_MULT
+                    sl = fill_price - atr_val * cfg.ATR_SL_MULT
+                    tp = fill_price + atr_val * cfg.ATR_TP_MULT
                 else:
-                    sl = fill_price + atr_val * ATR_SL_MULT
-                    tp = fill_price - atr_val * ATR_TP_MULT
+                    sl = fill_price + atr_val * cfg.ATR_SL_MULT
+                    tp = fill_price - atr_val * cfg.ATR_TP_MULT
+
+                # Commission cost (deducted from equity at entry)
+                commission = cfg.COMMISSION * order.qty
+                self.equity -= commission
 
                 t = Trade(
                     entry_date=date,
@@ -145,14 +201,15 @@ class Backtester:
                 self.trades.append(t)
                 rm.add_position()
                 log.debug(
-                    f"FILL  {t.direction} {date.date()} {t.qty:.4f}x{TRADE_SYMBOL} "
-                    f"@ {fill_price:.2f} (open={open_:.2f} +slip)"
+                    f"FILL  {t.direction} {date.date()} {t.qty:.4f}x{cfg.TRADE_SYMBOL} "
+                    f"@ {fill_price:.2f} (open={open_:.2f} slip={dyn_slip:.4f} spread={spread:.4f})"
                 )
             pending = new_pending          # always empty after processing
 
             # ── 2. Check open trades for SL / TP hit ──────────
             #    Worst-case rule: if *both* SL and TP could fire in the
             #    same bar, assume the stop-loss hit first (pessimistic).
+            #    Exit costs: spread applied on exit too.
             still_open: list[Trade] = []
             for t in self._open_trades:
                 hit = False
@@ -160,24 +217,27 @@ class Backtester:
                     sl_hit = low <= t.stop_loss
                     tp_hit = high >= t.take_profit
                     if sl_hit:                       # SL checked first (worst case)
-                        t.exit_price = t.stop_loss
+                        # Apply spread on exit (fills slightly worse)
+                        t.exit_price = t.stop_loss * (1 - cfg.SPREAD_PCT)
                         hit = True
                     elif tp_hit:
-                        t.exit_price = t.take_profit
+                        t.exit_price = t.take_profit * (1 - cfg.SPREAD_PCT)
                         hit = True
                 else:  # SHORT
                     sl_hit = high >= t.stop_loss
                     tp_hit = low <= t.take_profit
                     if sl_hit:
-                        t.exit_price = t.stop_loss
+                        t.exit_price = t.stop_loss * (1 + cfg.SPREAD_PCT)
                         hit = True
                     elif tp_hit:
-                        t.exit_price = t.take_profit
+                        t.exit_price = t.take_profit * (1 + cfg.SPREAD_PCT)
                         hit = True
 
                 if hit:
                     multiplier = 1 if t.direction == Direction.LONG.value else -1
                     t.pnl = (t.exit_price - t.entry_price) * t.qty * multiplier
+                    # Exit commission
+                    t.pnl -= cfg.COMMISSION * t.qty
                     t.exit_date = date
                     t.status = "CLOSED"
                     rm.record_fill(t.pnl)
@@ -192,7 +252,7 @@ class Backtester:
             #    Signal appears on this bar → order evaluated now →
             #    actually filled at tomorrow's Open (step 1 on next bar).
             sig = sig_lookup.get(date)
-            if sig is not None:
+            if sig is not None and not drawdown_halt:
                 vetoed = False
                 if self.use_ml and self.model is not None:
                     try:
@@ -257,7 +317,7 @@ class Backtester:
                         log.error(f"ML Prediction failed: {e}")
 
                 if not vetoed:
-                    order = rm.evaluate(sig, TRADE_SYMBOL)
+                    order = rm.evaluate(sig, cfg.TRADE_SYMBOL)
                     if order is not None:
                         pending.append((order, sig))
                         log.debug(
@@ -300,6 +360,7 @@ class Backtester:
         expectancy  = np.mean(pnls) if pnls else 0
 
         rows = [
+            ["Timeframe",       cfg.ACTIVE_TIMEFRAME.upper()],
             ["Start Equity",    f"${self.start_equity:,.2f}"],
             ["End Equity",      f"${self.equity:,.2f}"],
             ["Total P&L",       f"${total_pnl:+,.2f}"],
@@ -343,10 +404,11 @@ class Backtester:
         log.info(f"Trade journal saved → {path}")
 
     def plot_equity(self, path=None) -> None:
-        path = path or (LOGS_DIR / "equity_curve.png")
+        from config import LOGS_DIR
+        path = path or (LOGS_DIR / f"equity_curve_{cfg.ACTIVE_TIMEFRAME}.png")
         plt.figure(figsize=(12, 5))
         plt.plot(self.equity_curve, linewidth=1)
-        plt.title("Equity Curve (Backtest)")
+        plt.title(f"Equity Curve (Backtest – {cfg.ACTIVE_TIMEFRAME.upper()})")
         plt.xlabel("Bar #")
         plt.ylabel("Equity ($)")
         plt.grid(True, alpha=0.3)
@@ -358,23 +420,50 @@ class Backtester:
 
 # ── CLI ───────────────────────────────────────────────────────
 
+def _apply_timeframe_override(tf: str) -> None:
+    """Hot-swap the active timeframe preset at runtime (before any data is loaded)."""
+    if tf == cfg.ACTIVE_TIMEFRAME:
+        return
+    if tf not in cfg.TIMEFRAME_PRESETS:
+        raise ValueError(f"Unknown timeframe '{tf}'. Choose from: {list(cfg.TIMEFRAME_PRESETS.keys())}")
+
+    log.info(f"Overriding timeframe: {cfg.ACTIVE_TIMEFRAME} → {tf}")
+    cfg.ACTIVE_TIMEFRAME = tf
+    preset = cfg.TIMEFRAME_PRESETS[tf]
+
+    # Re-unpack every preset variable into the config module
+    for key, value in preset.items():
+        setattr(cfg, key, value)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest the gold strategy")
     parser.add_argument("--equity", type=float, default=INITIAL_EQUITY, help="Starting equity")
     parser.add_argument("--use-ml", action="store_true", help="Enable the ML model veto filter")
+    parser.add_argument(
+        "--timeframe", "-tf",
+        choices=list(cfg.TIMEFRAME_PRESETS.keys()),
+        default=None,
+        help="Override active timeframe (e.g. 1d, 4h)",
+    )
     args = parser.parse_args()
 
+    if args.timeframe:
+        _apply_timeframe_override(args.timeframe)
+
+    log.info(f"═══ Backtest starting  [timeframe={cfg.ACTIVE_TIMEFRAME}] ═══")
+
     log.info("Fetching signal data …")
-    signal_df = fetch_and_enrich(SIGNAL_SYMBOL)
+    signal_df = fetch_and_enrich(cfg.SIGNAL_SYMBOL)
 
     log.info("Fetching trade-proxy data …")
-    trade_df  = fetch_and_enrich(TRADE_SYMBOL)
+    trade_df  = fetch_and_enrich(cfg.TRADE_SYMBOL)
 
     # Align to shared dates
     common = signal_df.index.intersection(trade_df.index)
     signal_df = signal_df.loc[common]
     trade_df  = trade_df.loc[common]
-    log.info(f"Aligned {len(common)} shared trading days")
+    log.info(f"Aligned {len(common)} shared trading bars")
 
     bt = Backtester(equity=args.equity, use_ml=args.use_ml)
     bt.run(signal_df, trade_df)
