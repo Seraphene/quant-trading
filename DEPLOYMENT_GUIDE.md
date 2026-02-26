@@ -2,20 +2,24 @@
 
 This guide explains how to deploy your `quant-trading` system to a Google Cloud Platform (GCP) Virtual Machine and run it 24/7 using Docker.
 
-## 1. Prepare Your VM
-1.  **Create an Instance**: Go to GCP Console -> Compute Engine -> VM Instances -> Create Instance.
-    - **Machine Type**: `e2-micro` is sufficient for this bot.
-    - **OS**: Ubuntu 22.04 LTS (recommended).
-2.  **SSH into VM**: Use the "SSH" button in the GCP console.
-3.  **Install Docker**: Run these commands on your VM:
-    ```bash
-    sudo apt-get update
-    sudo apt-get install -y docker.io
-    sudo systemctl start docker
-    sudo systemctl enable docker
-    sudo usermod -aG docker $USER
-    # Logout and log back in for group changes to take effect
-    ```
+## 1. Prerequisites (Existing VM)
+This guide assumes you already have a Google Cloud VM running with **Docker** installed.
+
+### A. Fix Permission Denied
+If you see `permission denied` when running Docker, it's because your user lacks rights.
+- **Quick Fix**: Add `sudo` before every command (e.g., `sudo docker build`).
+- **Permanent Fix**: Run these to add yourself to the docker group:
+  ```bash
+  sudo usermod -aG docker $USER
+  newgrp docker # This activates the change in your current session
+  ```
+
+### B. Install Docker Compose
+If `docker-compose` is not found, install the modern plugin:
+```bash
+sudo apt-get install -y docker-compose-plugin
+```
+*Note: Once installed, use `docker compose` (with a space) instead of `docker-compose` (with a hyphen).*
 
 ## 2. Upload Your Code
 You can use `git` or `scp` to upload your code to the VM.

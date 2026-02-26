@@ -1,29 +1,29 @@
-# Use an official Python runtime as a parent image
-FROM python:3.11-slim
+# Stage 1: Builder
+FROM python:3.11-alpine as builder
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV TZ=UTC
-
-# Set the working directory in the container
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# Install build dependencies for pandas/numpy
+RUN apk add --no-cache \
+    gcc \
+    musl-dev \
+    g++ \
+    libffi-dev
 
-# Copy requirements and install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --user -r requirements.txt
 
-# Copy the rest of the application code
+# Stage 2: Runtime
+FROM python:3.11-alpine
+
+WORKDIR /app
+ENV TZ=UTC
+ENV PATH=/root/.local/bin:$PATH
+
+# Copy installed packages from builder
+COPY --from=builder /root/.local /root/.local
 COPY . .
 
-# Create necessary directories
 RUN mkdir -p data logs models
 
-# Default command (can be overridden in docker-compose or docker run)
-# We default to the scanner in loop mode, but user can change this.
-CMD ["python", "scanner.py", "--symbols", "SGOL", "--loop"]
+CMD ["python", "scanner.py", "--symbols", "SGOL", "--timeframe", "1d", "4h", "--use-ml", "--loop"]

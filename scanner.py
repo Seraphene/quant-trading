@@ -34,11 +34,15 @@ from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass
 
+import os
+import joblib
+
 import pandas as pd
+import numpy as np
 
 import config as cfg
 from data_fetch import fetch_and_enrich
-from strategy import generate_signals, latest_signal, Direction
+from strategy import generate_signals, latest_signal, Direction, Signal
 from logger import get_logger
 from notifications import send_signal_email
 
@@ -46,6 +50,100 @@ log = get_logger("scanner")
 
 # Persistent storage for notified signals to avoid duplicates
 NOTIFIED_SIGNALS_FILE = cfg.LOGS_DIR / "notified_signals.json"
+
+
+# ── ML Filter Manager ──────────────────────────────────────────
+
+class MLManager:
+    """Manages ML model loading and prediction for signal filtering."""
+    def __init__(self):
+        self.model = None
+        self.use_ml = False
+        
+        model_path = cfg.MODELS_DIR / "logistic_regression_model.pkl"
+        if model_path.exists():
+            try:
+                log.info(f"Loading ML model from {model_path} ...")
+                self.model = joblib.load(model_path)
+                self.use_ml = True
+            except Exception as e:
+                log.error(f"Failed to load ML model: {e}")
+        else:
+            log.warning(f"ML model not found at {model_path}. Proceeding without ML veto.")
+
+    def should_veto(self, df: pd.DataFrame, sig: Signal) -> bool:
+        """Return True if the ML model vetoes this signal."""
+        if not self.use_ml or self.model is None:
+            return False
+
+        try:
+            # ── Engineer the 26 features expected by the model ──
+            # (Matches backtest.py logic exactly)
+            date = sig.date
+            row = df.loc[date]
+            i = df.index.get_loc(date)
+            
+            # Date features
+            entry_yr = date.year
+            entry_mo = date.month
+            entry_dy = date.day
+            entry_dow = date.dayofweek
+            
+            # Engineered Technicals
+            atr_ratio = row["ATR"] / row["Close"] if row["Close"] != 0 else 0
+            ema_gap = (row["EMA_fast"] - row["EMA_slow"]) / row["EMA_slow"] if row["EMA_slow"] != 0 else 0
+            macd = row.get("MACD", 0)
+            macds = row.get("MACD_signal", 0)
+            momentum = row["Close"] - df.iloc[max(0, i - 5)]["Close"]
+            vol_change = row["Volume"] / df.iloc[max(0, i - 1)]["Volume"] if df.iloc[max(0, i - 1)]["Volume"] != 0 else 1.0
+            
+            # Factor One-Hot Encoding
+            f_list = sig.factors
+            
+            features_dict = {
+                'entry_price': row["Close"],
+                'stop_loss': sig.stop_loss,
+                'take_profit': sig.take_profit,
+                'confluence': sig.confluence,
+                'entry_year': entry_yr,
+                'entry_month': entry_mo,
+                'entry_day': entry_dy,
+                'entry_dayofweek': entry_dow,
+                'RSI': row["RSI"],
+                'MACD': macd,
+                'MACDs': macds,
+                'EMA_Gap': ema_gap,
+                'ATR': row["ATR"],
+                'ATR_Ratio': atr_ratio,
+                'Recent_Price_Momentum': momentum,
+                'Volume_Changes': vol_change,
+                'direction_SHORT': 1 if sig.direction == Direction.SHORT else 0,
+                'factor_FVG_zone': 1 if "FVG_zone" in f_list else 0,
+                'factor_LIQ_sweep': 1 if "LIQ_sweep" in f_list else 0,
+                'factor_EMA_trend': 1 if "EMA_trend" in f_list else 0,
+                'factor_MACD_confirm': 1 if "MACD_confirm" in f_list else 0,
+                'factor_Order_Block': 1 if "Order_Block" in f_list else 0,
+                'factor_RSI_filter': 1 if "RSI_filter" in f_list else 0,
+                'factor_EMA_cross': 1 if "EMA_cross" in f_list else 0
+            }
+            
+            features_df = pd.DataFrame([features_dict])
+            
+            # Ensure column order perfectly matches model expectations
+            if hasattr(self.model, "feature_names_in_"):
+                features_df = features_df[self.model.feature_names_in_]
+                
+            win_prob = self.model.predict_proba(features_df)[0][1]
+            if win_prob < 0.50:
+                log.info(f"AI VETO: Win prob {win_prob:.2%} < 50%. Skipping signal.")
+                return True
+            
+            log.info(f"AI APPROVED: Win prob {win_prob:.2%} >= 50%.")
+            return False
+            
+        except Exception as e:
+            log.error(f"ML Prediction failed: {e}")
+            return False
 
 
 # ── Apply timeframe override (same as backtest/paper_bot) ─────
@@ -87,7 +185,7 @@ def save_notified_signals(notified: set):
 
 # ── Scan a single symbol ──────────────────────────────────────
 
-def scan_symbol(symbol: str, force: bool = False, provider: str = None) -> dict | None:
+def scan_symbol(symbol: str, force: bool = False, provider: str = None, ml_manager: MLManager = None) -> dict | None:
     """
     Fetch data, run strategy, return latest signal details or None.
     """
@@ -106,6 +204,10 @@ def scan_symbol(symbol: str, force: bool = False, provider: str = None) -> dict 
 
     sig = latest_signal(df)
     if sig is None:
+        return None
+
+    # ML Veto Filter
+    if ml_manager and ml_manager.should_veto(df, sig):
         return None
 
     # Calculate risk/reward ratio (from original signal entry)
@@ -170,7 +272,8 @@ def scan_symbol(symbol: str, force: bool = False, provider: str = None) -> dict 
         "atr": sig.atr,
         "pct_from_signal": pct_from_signal,
         "bars_ago": bars_ago,
-        "last_bar_date": df.index[-1]
+        "last_bar_date": df.index[-1],
+        "timeframe": cfg.ACTIVE_TIMEFRAME
     }
 
 
@@ -251,9 +354,14 @@ Common tickers:
     )
     parser.add_argument(
         "--timeframe", "-tf",
+        nargs="+",
         choices=list(cfg.TIMEFRAME_PRESETS.keys()),
         default=None,
-        help="Override active timeframe (e.g. 1d, 4h)",
+        help="Override active timeframe (e.g. 1d, 4h). Can specify multiple.",
+    )
+    parser.add_argument(
+        "--use-ml", action="store_true",
+        help="Enable the ML model veto filter to reduce false positives",
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -277,10 +385,10 @@ Common tickers:
     )
     args = parser.parse_args()
 
-    if args.timeframe:
-        _apply_timeframe_override(args.timeframe)
+    timeframes = args.timeframe if args.timeframe else [cfg.ACTIVE_TIMEFRAME]
+    ml_manager = MLManager() if args.use_ml else None
 
-    log.info(f"Scanning {len(args.symbols)} symbol(s) on {cfg.ACTIVE_TIMEFRAME} timeframe")
+    log.info(f"Scanning {len(args.symbols)} symbol(s) on {timeframes} timeframe(s)")
 
     def _run_scan() -> None:
         """Execute a single scan pass."""
@@ -292,32 +400,37 @@ Common tickers:
         notified = load_notified_signals()
         new_notified = False
 
-        for sym in args.symbols:
-            log.info(f"Scanning {sym} ...")
-            result = scan_symbol(sym, force=force, provider=args.provider)
-            if result:
-                if args.max_age is not None and result["bars_ago"] > args.max_age:
-                    log.info(f"{sym}: Signal too old ({result['bars_ago']} bars > {args.max_age})")
-                else:
-                    results.append(result)
-                    
-                    # Email logic: only notify if it's a NEW signal
-                    # A signal is "new" if (symbol, date) is NOT in notified
-                    sig_key = (sym, str(result["signal_date"]))
-                    if sig_key not in notified:
-                        log.info(f"New signal for {sym} detected! Sending notification...")
-                        if send_signal_email(result):
-                            notified.add(sig_key)
-                            new_notified = True
+        for tf in timeframes:
+            # Apply timeframe context
+            _apply_timeframe_override(tf)
+            
+            for sym in args.symbols:
+                log.info(f"Scanning {sym} [{tf}] ...")
+                result = scan_symbol(sym, force=force, provider=args.provider, ml_manager=ml_manager)
+                if result:
+                    if args.max_age is not None and result["bars_ago"] > args.max_age:
+                        log.info(f"{sym}: Signal too old ({result['bars_ago']} bars > {args.max_age})")
                     else:
-                        log.debug(f"Signal for {sym} @ {result['signal_date']} already notified.")
-            else:
-                log.info(f"{sym}: No signal")
+                        results.append(result)
+                        
+                        # Email logic: only notify if it's a NEW signal
+                        # Unique key: (symbol, timeframe, date)
+                        sig_key = (sym, tf, str(result["signal_date"]))
+                        if sig_key not in notified:
+                            log.info(f"New signal for {sym} [{tf}] detected! Sending notification...")
+                            if send_signal_email(result):
+                                notified.add(sig_key)
+                                new_notified = True
+                        else:
+                            log.debug(f"Signal for {sym} [{tf}] @ {result['signal_date']} already notified.")
+                else:
+                    log.info(f"{sym} [{tf}]: No signal (or vetoed by ML)")
         
         if new_notified:
             save_notified_signals(notified)
 
-        print_results(results, cfg.ACTIVE_TIMEFRAME)
+        # Print passthrough grouped result (using combined list)
+        print_results(results, "Mixed" if len(timeframes) > 1 else timeframes[0])
 
     if not args.loop:
         _run_scan()

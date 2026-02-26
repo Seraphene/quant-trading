@@ -38,14 +38,16 @@ def send_signal_email(signal_data: dict) -> bool:
     confluence = signal_data["confluence"]
     factors = ", ".join(signal_data["factors"])
     date = signal_data["signal_date"]
+    timeframe = signal_data.get("timeframe", cfg.ACTIVE_TIMEFRAME).upper()
 
-    subject = f"TRADE SIGNAL: {direction} {symbol} @ ${entry:.2f}"
+    subject = f"TRADE SIGNAL [{timeframe}]: {direction} {symbol} @ ${entry:.2f}"
     
     body = f"""
-    QUANT-TRADING SIGNAL DETECTED
-    =============================
+    QUANT-TRADING SIGNAL DETECTED [{timeframe}]
+    ============================================
     
     Symbol:      {symbol}
+    Timeframe:   {timeframe}
     Direction:   {direction}
     Signal Date: {date}
     

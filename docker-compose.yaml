@@ -10,7 +10,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-    command: python scanner.py --symbols SGOL --loop --interval 60
+    command: python scanner.py --symbols SGOL --timeframe 1d 4h --use-ml --loop --interval 60
 
   # Uncomment this to run the paper bot instead
   # bot:
