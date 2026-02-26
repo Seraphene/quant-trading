@@ -82,6 +82,88 @@ def send_signal_email(signal_data: dict) -> bool:
         log.error(f"Failed to send email alert: {e}")
         return False
 
+
+def send_grouped_signal_email(symbol: str, signals: list[dict]) -> bool:
+    """
+    Send ONE email per symbol containing signals from all scanned timeframes.
+    
+    Parameters
+    ----------
+    symbol : str
+        The ticker symbol (e.g. SGOL, GC=F).
+    signals : list[dict]
+        A list of signal_data dicts, each with a 'timeframe' key.
+    """
+    if not cfg.ENABLE_EMAIL:
+        log.debug("Email notifications are disabled in config.")
+        return False
+
+    if not all([cfg.SMTP_SERVER, cfg.SMTP_USERNAME, cfg.SMTP_PASSWORD, cfg.NOTIFICATION_EMAIL]):
+        log.warning("Email configuration is incomplete. Skipping notification.")
+        return False
+
+    if not signals:
+        return False
+
+    tf_labels = [s.get("timeframe", "?").upper() for s in signals]
+    subject = f"TRADE SIGNALS: {symbol} [{', '.join(tf_labels)}]"
+
+    body_parts = [
+        f"    QUANT-TRADING SIGNAL REPORT: {symbol}",
+        f"    {'=' * 45}",
+        "",
+    ]
+
+    for s in signals:
+        tf = s.get("timeframe", "?").upper()
+        direction = s["direction"]
+        entry = s["entry_price"]
+        sl = s["stop_loss"]
+        tp = s["take_profit"]
+        rr = s["risk_reward"]
+        confluence = s["confluence"]
+        factors = ", ".join(s["factors"])
+        date = s["signal_date"]
+
+        body_parts.extend([
+            f"    --- {tf} Timeframe ---",
+            f"    Direction:   {direction}",
+            f"    Signal Date: {date}",
+            f"    Entry:       ${entry:.2f}",
+            f"    Stop-Loss:   ${sl:.2f}",
+            f"    Take-Profit: ${tp:.2f}",
+            f"    Risk:Reward: 1:{rr:.1f}",
+            f"    Confluence:  {confluence}/8",
+            f"    Factors:     {factors}",
+            "",
+        ])
+
+    body_parts.extend([
+        "    ---",
+        "    This is an automated alert from your quant-trading system.",
+    ])
+
+    body = "\n".join(body_parts)
+
+    msg = MIMEMultipart()
+    msg['From'] = cfg.SMTP_USERNAME
+    msg['To'] = cfg.NOTIFICATION_EMAIL
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+
+    try:
+        log.info(f"Sending grouped email for {symbol} ({tf_labels}) to {cfg.NOTIFICATION_EMAIL} ...")
+        with smtplib.SMTP(cfg.SMTP_SERVER, cfg.SMTP_PORT) as server:
+            server.starttls()
+            server.login(cfg.SMTP_USERNAME, cfg.SMTP_PASSWORD)
+            server.send_message(msg)
+        log.info("Grouped email sent successfully.")
+        return True
+    except Exception as e:
+        log.error(f"Failed to send grouped email: {e}")
+        return False
+
+
 def send_execution_email(symbol: str, side: str, qty: float, price: float) -> bool:
     """Send an alert when the paper bot executes a trade."""
     if not cfg.ENABLE_EMAIL:

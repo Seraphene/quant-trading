@@ -44,7 +44,7 @@ import config as cfg
 from data_fetch import fetch_and_enrich
 from strategy import generate_signals, latest_signal, Direction, Signal
 from logger import get_logger
-from notifications import send_signal_email
+from notifications import send_signal_email, send_grouped_signal_email
 
 log = get_logger("scanner")
 
@@ -166,8 +166,8 @@ def load_notified_signals() -> set:
     try:
         with open(NOTIFIED_SIGNALS_FILE, "r") as f:
             data = json.load(f)
-            # Store as (symbol, signal_date) tuples
-            return {tuple(item) for item in data}
+            # Store as string keys
+            return set(data)
     except Exception as e:
         log.error(f"Failed to load notified signals: {e}")
         return set()
@@ -177,7 +177,7 @@ def save_notified_signals(notified: set):
     """Save notified signals to disk."""
     try:
         with open(NOTIFIED_SIGNALS_FILE, "w") as f:
-            # Convert set to list for JSON serialization
+            # Convert set to list of strings for JSON serialization
             json.dump(list(notified), f)
     except Exception as e:
         log.error(f"Failed to save notified signals: {e}")
@@ -349,8 +349,8 @@ Common tickers:
     parser.add_argument(
         "--symbols", "-s",
         nargs="+",
-        default=[cfg.SIGNAL_SYMBOL],
-        help="One or more yfinance tickers to scan (default: SGOL)",
+        default=[cfg.SIGNAL_SYMBOL, "GC=F"],
+        help="One or more yfinance tickers to scan (default: SGOL GC=F)",
     )
     parser.add_argument(
         "--timeframe", "-tf",
@@ -400,11 +400,14 @@ Common tickers:
         notified = load_notified_signals()
         new_notified = False
 
-        for tf in timeframes:
-            # Apply timeframe context
-            _apply_timeframe_override(tf)
+        # Group signals by symbol (scan all timeframes per symbol)
+        for sym in args.symbols:
+            sym_signals = []  # collect signals across all timeframes for this symbol
             
-            for sym in args.symbols:
+            for tf in timeframes:
+                # Apply timeframe context
+                _apply_timeframe_override(tf)
+                
                 log.info(f"Scanning {sym} [{tf}] ...")
                 result = scan_symbol(sym, force=force, provider=args.provider, ml_manager=ml_manager)
                 if result:
@@ -412,19 +415,23 @@ Common tickers:
                         log.info(f"{sym}: Signal too old ({result['bars_ago']} bars > {args.max_age})")
                     else:
                         results.append(result)
-                        
-                        # Email logic: only notify if it's a NEW signal
-                        # Unique key: (symbol, timeframe, date)
-                        sig_key = (sym, tf, str(result["signal_date"]))
-                        if sig_key not in notified:
-                            log.info(f"New signal for {sym} [{tf}] detected! Sending notification...")
-                            if send_signal_email(result):
-                                notified.add(sig_key)
-                                new_notified = True
-                        else:
-                            log.debug(f"Signal for {sym} [{tf}] @ {result['signal_date']} already notified.")
+                        sym_signals.append(result)
                 else:
                     log.info(f"{sym} [{tf}]: No signal (or vetoed by ML)")
+            
+            # Send ONE grouped email per symbol (only if there are NEW signals)
+            if sym_signals:
+                # Build a composite key: symbol + sorted signal dates/timeframes
+                sig_parts = sorted(str(s["signal_date"]) + "|" + s.get("timeframe", "") for s in sym_signals)
+                sig_key = sym + "::" + ",".join(sig_parts)
+                
+                if sig_key not in notified:
+                    log.info(f"New signals for {sym} detected! Sending grouped notification...")
+                    if send_grouped_signal_email(sym, sym_signals):
+                        notified.add(sig_key)
+                        new_notified = True
+                else:
+                    log.debug(f"Signals for {sym} already notified (same signal set).")
         
         if new_notified:
             save_notified_signals(notified)
