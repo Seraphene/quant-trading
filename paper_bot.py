@@ -37,6 +37,7 @@ from data_fetch import fetch_and_enrich
 from strategy import latest_signal, Direction
 from risk_manager import RiskManager, OrderRequest
 from logger import get_logger
+from notifications import send_execution_email
 
 log = get_logger("paper_bot")
 
@@ -85,11 +86,18 @@ def submit_bracket_order(client: TradingClient, order: OrderRequest) -> None:
         f"{side.value} {order.qty} × {order.symbol}  "
         f"SL={order.stop_loss:.2f}  TP={order.take_profit:.2f}"
     )
+    # Send notification for the executed order
+    send_execution_email(
+        symbol=order.symbol,
+        side=side.value,
+        qty=order.qty,
+        price=order.entry_price # Use intended entry price from signal
+    )
 
 
 # ── Main decision cycle ──────────────────────────────────────
 
-def run_cycle() -> None:
+def run_cycle(provider: str = None) -> None:
     log.info("═══ Paper-bot cycle starting ═══")
 
     client = get_client()
@@ -103,7 +111,7 @@ def run_cycle() -> None:
     # whose H/L/C are still moving — using it would produce unreliable
     # signals (the "candle is still moving" problem).
     log.info(f"Fetching latest data for {SIGNAL_SYMBOL} …")
-    df = fetch_and_enrich(SIGNAL_SYMBOL, force=True, drop_incomplete=True)
+    df = fetch_and_enrich(SIGNAL_SYMBOL, force=True, drop_incomplete=True, provider=provider)
     sig = latest_signal(df)
 
     if sig is None:
@@ -234,7 +242,7 @@ def loop(check_hour: int = 16, check_minute: int = 5) -> None:
 
     def _job():
         try:
-            run_cycle()
+            run_cycle(provider=None) # Uses cfg.DATA_PROVIDER
         except Exception as e:
             log.exception(f"Cycle failed: {e}")
 
@@ -271,6 +279,10 @@ def main() -> None:
         default=None,
         help="Override active timeframe (e.g. 1d, 4h)",
     )
+    parser.add_argument(
+        "--provider", type=str, choices=["yfinance", "alpaca"], default=None,
+        help="Data provider to use (default: config.DATA_PROVIDER)",
+    )
     args = parser.parse_args()
 
     if args.timeframe:
@@ -281,7 +293,7 @@ def main() -> None:
     if args.loop:
         loop(args.hour, args.minute)
     else:
-        run_cycle()
+        run_cycle(provider=args.provider)
 
 
 if __name__ == "__main__":

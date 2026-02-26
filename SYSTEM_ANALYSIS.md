@@ -79,49 +79,74 @@ The resulting trained model (e.g., `.pkl`) is then exported back to the local `m
 
 ---
 
-## 5. Timeframe Preset System (1D ↔ 4H Switching)
+## 5. Timeframe Preset System (1D ↔ 4H ↔ 1H Switching)
 
-The system supports **instant switching** between Daily (1D) and 4-Hour (4H) trading modes through a preset system in `config.py`. No code changes are required — only a single variable or CLI flag needs to change.
+The system supports **instant switching** between Daily (1D), 4-Hour (4H), and 1-Hour (1H) trading modes through a preset system in `config.py`. No code changes are required — only a single variable or CLI flag needs to change.
 
 ### How to Switch Timeframes
 
 **Method 1 – Edit `config.py` (permanent):**
 ```python
-ACTIVE_TIMEFRAME: str = "1d"   # ← change to "4h" for intraday
+ACTIVE_TIMEFRAME: str = "1d"   # ← change to "4h" or "1h"
 ```
 
 **Method 2 – CLI flag (per-run, no file edits):**
 ```bash
 python backtest.py --timeframe 4h --equity 500
-python backtest.py --timeframe 1d
+python backtest.py --timeframe 1h
+python scanner.py --symbols GC=F --timeframe 1h --force
 python paper_bot.py --timeframe 4h
 ```
 
 **Method 3 – Environment variable:**
 ```bash
-set TIMEFRAME=4h
+set TIMEFRAME=1h
 python backtest.py
 ```
 
-### Parameter Differences (1D vs 4H)
+### Parameter Differences (1D vs 4H vs 1H)
 
-| Parameter | Daily (1D) | 4-Hour (4H) | Rationale |
-|-----------|-----------|-------------|-----------|
-| `LOOKBACK_YEARS` | 5 | 2 | yfinance intraday limit ~730 days |
-| `ATR_TP_MULT` | 3.0 | 2.5 | Tighter TP for smaller intraday moves |
-| `FVG_MIN_BODY_ATR` | 1.0 | 0.8 | Lower displacement threshold |
-| `FVG_LOOKBACK` | 50 | 80 | More bars to scan (4h bars accumulate faster) |
-| `OB_LOOKBACK` | 20 | 30 | Wider lookback for order blocks |
-| `LIQ_SWEEP_LOOKBACK` | 20 | 30 | Wider lookback for liquidity sweeps |
-| `STRUCTURE_BREAK_BARS` | 5 | 8 | More bars between structural breaks |
-| `SIGNAL_COOLDOWN` | 5 (1 week) | 3 (12 hours) | Shorter cooldown for faster timeframe |
-| `RISK_PER_TRADE` | 2.0% | 1.5% | Slightly lower risk for more frequent trades |
+| Parameter | Daily (1D) | 4-Hour (4H) | 1-Hour (1H) | Rationale |
+|-----------|-----------|-------------|-------------|-----------|
+| `LOOKBACK_YEARS` | 5 | 2 | 2 | yfinance intraday limit ~730 days |
+| `ATR_TP_MULT` | 3.0 | 2.5 | 2.0 | Tighter TP for faster timeframes |
+| `FVG_MIN_BODY_ATR` | 1.0 | 0.8 | 0.6 | Lower displacement threshold |
+| `FVG_LOOKBACK` | 50 | 80 | 120 | More bars on faster timeframes |
+| `OB_LOOKBACK` | 20 | 30 | 40 | Wider lookback for order blocks |
+| `LIQ_SWEEP_LOOKBACK` | 20 | 30 | 40 | Wider lookback for liquidity sweeps |
+| `STRUCTURE_BREAK_BARS` | 5 | 8 | 10 | More bars between structural breaks |
+| `SIGNAL_COOLDOWN` | 5 (1 week) | 3 (12 hours) | 5 (5 hours) | Adapted for each timeframe |
+| `RISK_PER_TRADE` | 2.0% | 1.5% | 1.0% | Lower risk for higher-frequency trading |
 
 ### Important Notes
-1. **Data caching**: Each timeframe gets its own CSV (e.g., `SGOL_1d.csv`, `SGOL_4h.csv`), so switching does not trigger unnecessary re-downloads.
-2. **4H Resampling**: yfinance does not support `4h` intervals natively. The system downloads 1-hour data and resamples to 4-hour candles automatically.
-3. **ML Model**: The ML model (`logistic_regression_model.pkl`) was trained on 1D data. If switching to 4H, you should retrain the model on 4H backtest results for best accuracy.
-4. **4H Tuning**: The 4H preset values are reasonable starting defaults. Run a 4H backtest and review performance before live trading — you may want to adjust `ATR_TP_MULT`, `SIGNAL_COOLDOWN`, and SMC lookbacks based on results.
+1. **Data caching**: Each timeframe gets its own CSV (e.g., `SGOL_1d.csv`, `SGOL_4h.csv`, `SGOL_1h.csv`), so switching does not trigger unnecessary re-downloads.
+2. **4H Resampling**: yfinance does not support `4h` intervals natively. The system downloads 1-hour data and resamples to 4-hour candles automatically. The `1h` timeframe uses yfinance's native `1h` interval directly.
+3. **ML Model**: The ML model (`logistic_regression_model.pkl`) was trained on 1D data. If switching to 4H or 1H, you should retrain the model on the corresponding backtest results for best accuracy.
+4. **Intraday Tuning**: The 4H and 1H preset values are reasonable starting defaults. Run a backtest on the target timeframe and review performance before live trading.
+
+### Real-time Data Providers
+The system features a pluggable data provider architecture in `data_fetch.py`, allowing it to bypass the delays of `yfinance` for supported symbols.
+
+| Provider | Best For | Delay | Fallback |
+|----------|----------|-------|----------|
+| **yfinance** | Futures/Forex/Global | ~15 min | None (Primary fallback) |
+| **Alpaca** | US Stocks & ETFs | ~15 min (Free) / Real-time (Paid) | yfinance |
+
+**Key logic:**
+- If `DATA_PROVIDER` is set to `alpaca`, the system uses `StockHistoricalDataClient`.
+- For Free tier users, a **16-minute buffer** is automatically applied to requests to avoid subscription errors ("SIP data restricted").
+- **Automatic routing:** If a symbol like `GC=F` (Gold Futures) is requested via Alpaca, the system warns the user and automatically routes the request through `yfinance`.
+
+### Scanner Loop Mode
+The `scanner.py` now supports continuous monitoring with `--loop`:
+```bash
+python scanner.py --symbols SGOL --provider alpaca --loop           # scan every 60s
+python scanner.py --symbols GC=F --timeframe 1h --loop --interval 120  # every 2 min
+```
+**Enhancements:**
+- **Real-time Refresh:** In loop mode, every scan pass uses `--force` to ensure indicators are computed on the latest available market data.
+- **Improved UX:** A countdown timer is displayed between scans, and a clean, Unicode-aware (Windows-safe) ASCII table displays findings.
+- **Windows Compatibility:** All decorative Unicode characters were replaced with standard ASCII to prevent encoding crashes on Windows terminals.
 
 ---
 

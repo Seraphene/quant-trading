@@ -7,11 +7,12 @@ TIMEFRAME SWITCHING
 ───────────────────
 Change `ACTIVE_TIMEFRAME` below (or set the TIMEFRAME env var) to switch
 the entire system between presets.  Every parameter that differs between
-Daily and 4-Hour trading is captured in TIMEFRAME_PRESETS — no other
+Daily, 4-Hour, and 1-Hour trading is captured in TIMEFRAME_PRESETS — no other
 file needs to be touched.
 
     ACTIVE_TIMEFRAME = "1d"   # swing trading on daily candles
     ACTIVE_TIMEFRAME = "4h"   # intraday on 4-hour candles
+    ACTIVE_TIMEFRAME = "1h"   # intraday on 1-hour candles
 """
 
 import os
@@ -20,7 +21,7 @@ from dotenv import load_dotenv
 
 # ── Load .env from project root ───────────────────────────────
 ROOT_DIR = Path(__file__).resolve().parent
-load_dotenv(ROOT_DIR / ".env")
+load_dotenv(ROOT_DIR / ".env", override=True)
 
 # ── Alpaca Credentials ────────────────────────────────────────
 ALPACA_API_KEY: str = os.getenv("ALPACA_API_KEY", "")
@@ -35,7 +36,16 @@ TRADE_SYMBOL: str  = "SGOL"        # Trade SGOL on Alpaca paper
 
 # ── Fractional Shares ─────────────────────────────────────────
 USE_FRACTIONAL: bool = True         # Alpaca supports fractional shares
+# ── Data Provider ─────────────────────────────────────────────
+DATA_PROVIDER: str = os.getenv("DATA_PROVIDER", "yfinance")  # "yfinance" or "alpaca"
 
+# ── Email Notifications ───────────────────────────────────────
+ENABLE_EMAIL: bool      = os.getenv("ENABLE_EMAIL", "False").lower() == "true"
+SMTP_SERVER: str        = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT: int          = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME: str      = os.getenv("SMTP_USERNAME", "")
+SMTP_PASSWORD: str      = os.getenv("SMTP_PASSWORD", "")  # Use App Password for Gmail
+NOTIFICATION_EMAIL: str = os.getenv("NOTIFICATION_EMAIL", "")
 # ═══════════════════════════════════════════════════════════════
 # TIMEFRAME PRESETS
 # ═══════════════════════════════════════════════════════════════
@@ -46,10 +56,11 @@ USE_FRACTIONAL: bool = True         # Alpaca supports fractional shares
 #
 #   python backtest.py --timeframe 4h
 #   python backtest.py --timeframe 1d
+#   python backtest.py --timeframe 1h
 #   set TIMEFRAME=4h && python paper_bot.py
 # ═══════════════════════════════════════════════════════════════
 
-ACTIVE_TIMEFRAME: str = os.getenv("TIMEFRAME", "1d")  # "1d" or "4h"
+ACTIVE_TIMEFRAME: str = os.getenv("TIMEFRAME", "1d")  # "1d", "4h", or "1h"
 
 TIMEFRAME_PRESETS: dict = {
     # ── Daily (1D) Swing-Trading Preset ───────────────────────
@@ -129,6 +140,46 @@ TIMEFRAME_PRESETS: dict = {
 
         # Risk Management
         "RISK_PER_TRADE":       0.015,   # slightly lower risk per trade
+        "DAILY_LOSS_LIMIT":     0.02,
+    },
+
+    # ── 1-Hour Intraday Preset ────────────────────────────────
+    "1h": {
+        "TIMEFRAME":            "1h",
+        "LOOKBACK_YEARS":       2,       # yfinance intraday limit ~730 days
+
+        # Strategy – Moving Averages
+        "EMA_FAST":             20,
+        "EMA_SLOW":             50,
+
+        # Strategy – RSI
+        "RSI_PERIOD":           14,
+        "RSI_OVERSOLD":         30.0,
+        "RSI_OVERBOUGHT":       70.0,
+
+        # Strategy – ATR Stop-Loss / Take-Profit
+        "ATR_PERIOD":           14,
+        "ATR_SL_MULT":          1.5,
+        "ATR_TP_MULT":          2.0,     # tighter TP for 1h moves
+
+        # Strategy – MACD
+        "MACD_FAST":            12,
+        "MACD_SLOW":            26,
+        "MACD_SIGNAL":          9,
+
+        # Smart Money Concepts (SMC)
+        "FVG_MIN_BODY_ATR":     0.6,     # lower displacement threshold for 1h
+        "FVG_LOOKBACK":         120,     # more bars to scan (1h bars)
+        "OB_LOOKBACK":          40,
+        "LIQ_SWEEP_LOOKBACK":   40,
+        "STRUCTURE_BREAK_BARS": 10,
+
+        # Confluence & Cooldown
+        "MIN_CONFLUENCE":       2,
+        "SIGNAL_COOLDOWN":      5,       # 5 bars = 5 hours
+
+        # Risk Management
+        "RISK_PER_TRADE":       0.01,    # lower risk for faster timeframe
         "DAILY_LOSS_LIMIT":     0.02,
     },
 }

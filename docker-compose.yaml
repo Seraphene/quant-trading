@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  scanner:
+    build: .
+    container_name: gold-scanner
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: python scanner.py --symbols SGOL --loop --interval 60
+
+  # Uncomment this to run the paper bot instead
+  # bot:
+  #   build: .
+  #   container_name: paper-bot
+  #   restart: always
+  #   env_file:
+  #     - .env
+  #   volumes:
+  #     - ./data:/app/data
+  #     - ./logs:/app/logs
+  #   command: python paper_bot.py --provider alpaca
